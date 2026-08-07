@@ -1,0 +1,1588 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HCCL AllReduce Concurrent Executor 数据传输过程（4P，rank1 视角，AICPU_TS）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f8f9fb;
+    color: #2c3e50;
+    line-height: 1.6;
+    padding: 30px 20px;
+  }
+
+  .container { max-width: 1200px; margin: 0 auto; }
+
+  /* ===== 标题 ===== */
+  h1 {
+    font-size: 24px;
+    font-weight: 700;
+    color: #1a1a2e;
+    text-align: center;
+    margin-bottom: 8px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #6b7280;
+    font-size: 14px;
+    margin-bottom: 30px;
+  }
+
+  /* ===== 条件设定 + 拓扑 ===== */
+  .top-bar {
+    display: flex;
+    gap: 20px;
+    margin-bottom: 30px;
+    flex-wrap: wrap;
+  }
+  .info-box {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 16px 20px;
+    flex: 1;
+    min-width: 200px;
+  }
+  .info-box h3 {
+    font-size: 14px;
+    color: #6b7280;
+    margin-bottom: 10px;
+    font-weight: 600;
+  }
+  .info-box .val {
+    font-size: 15px;
+    font-weight: 600;
+    color: #1a1a2e;
+    font-family: "Consolas", "Monaco", monospace;
+  }
+
+  .topo-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+  .topo-server {
+    background: #f3f4f6;
+    border-radius: 6px;
+    padding: 10px 8px;
+    text-align: center;
+    font-size: 12px;
+    position: relative;
+  }
+  .topo-server.highlight { background: #fef3c7; border: 2px solid #f59e0b; }
+  .topo-server .sname {
+    font-weight: 700;
+    color: #374151;
+    margin-bottom: 6px;
+    font-size: 13px;
+  }
+  .topo-server .ranks {
+    font-family: "Consolas", monospace;
+    font-size: 12px;
+    color: #374151;
+    line-height: 1.6;
+  }
+  .topo-server .myrank { color: #dc2626; font-weight: 700; }
+  .topo-server .path-tag {
+    display: inline-block;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin-top: 4px;
+    font-weight: 600;
+  }
+  .path-mesh { background: #dbeafe; color: #1d4ed8; }
+  .path-clos { background: #fef3c7; color: #b45309; }
+
+  /* ===== 步骤区块 ===== */
+  .step {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 24px;
+  }
+  .step-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 2px solid #f3f4f6;
+    flex-wrap: wrap;
+  }
+  .step-num {
+    width: 36px;
+    height: 36px;
+    line-height: 36px;
+    text-align: center;
+    background: #4f46e5;
+    color: #fff;
+    border-radius: 8px;
+    font-weight: 700;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .step-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: #1a1a2e;
+  }
+  .step-tag {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+  }
+  .tag-mesh { background: #dbeafe; color: #1d4ed8; }
+  .tag-nhr { background: #fef3c7; color: #b45309; }
+  .tag-aicpu { background: #d1fae5; color: #047857; }
+  .tag-concurrent { background: #fce7f3; color: #be185d; }
+  .tag-sync { background: #fee2e2; color: #dc2626; }
+
+  .step-desc {
+    font-size: 14px;
+    color: #4b5563;
+    margin-bottom: 18px;
+    line-height: 1.7;
+  }
+  .step-desc code {
+    background: #f3f4f6;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: "Consolas", monospace;
+  }
+
+  h3.sub-title {
+    font-size: 15px;
+    font-weight: 700;
+    color: #1a1a2e;
+    margin: 20px 0 12px 0;
+  }
+  h3.sub-title:first-child { margin-top: 0; }
+
+  /* ===== 数据矩阵 ===== */
+  .matrix-wrap {
+    display: flex;
+    gap: 30px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  .matrix-block {
+    flex: 1;
+    min-width: 300px;
+  }
+  .matrix-label {
+    text-align: center;
+    font-size: 13px;
+    font-weight: 600;
+    color: #6b7280;
+    margin-bottom: 8px;
+  }
+  .matrix-label .buf-name {
+    color: #4f46e5;
+    font-family: "Consolas", monospace;
+  }
+
+  .matrix {
+    display: inline-block;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #fff;
+  }
+  .matrix-row {
+    display: flex;
+    border-bottom: 1px solid #e5e7eb;
+  }
+  .matrix-row:last-child { border-bottom: none; }
+  .matrix-row .row-label {
+    width: 70px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+    background: #f9fafb;
+    border-right: 1px solid #e5e7eb;
+    font-family: "Consolas", monospace;
+  }
+  .matrix-row .row-label.myrank { color: #dc2626; background: #fef2f2; }
+
+  /* 传输过程章节：rank 标签去掉方框背景和边框，但数据矩阵保留外框和行分隔 */
+  .step-transmission .matrix-row .row-label {
+    background: transparent;
+    border-right: none;
+    font-weight: 700;
+  }
+  .step-transmission .matrix-row .row-label.myrank {
+    background: transparent;
+  }
+
+  .cell {
+    width: 64px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    font-weight: 600;
+    border-right: 1px solid rgba(255,255,255,0.3);
+    position: relative;
+    color: #1a1a2e;
+    font-family: "Consolas", monospace;
+  }
+  .cell:last-child { border-right: none; }
+  .cell.empty {
+    background: #f9fafb;
+    color: #d1d5db;
+    border: 1px dashed #e5e7eb;
+  }
+  .cell.sum {
+    color: #fff;
+    font-weight: 700;
+    box-shadow: inset 0 0 0 2px rgba(0,0,0,0.15);
+  }
+
+  /* chunk 颜色 */
+  .c0 { background: #93c5fd; }
+  .c1 { background: #fdba74; }
+  .c2 { background: #86efac; }
+  .c3 { background: #c4b5fd; }
+  .c0-sum { background: #1e40af; }
+  .c1-sum { background: #c2410c; }
+  .c2-sum { background: #15803d; }
+  .c3-sum { background: #6d28d9; }
+
+  /* NHR sub 颜色（不同色系，增加辨识度） */
+  .n0 { background: #67e8f9; }       /* 青色 */
+  .n1 { background: #f9a8d4; }       /* 粉色 */
+  .n2 { background: #bef264; }       /* 黄绿色 */
+  .n3 { background: #c4b5fd; }       /* 紫罗兰 */
+  .n0-sum { background: #0e7490; }
+  .n1-sum { background: #be185d; }
+  .n2-sum { background: #4d7c0f; }
+  .n3-sum { background: #5b21b6; }
+
+  /* 箭头 */
+  .arrow-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 60px;
+    padding: 20px 0;
+  }
+  .arrow {
+    font-size: 28px;
+    color: #9ca3af;
+  }
+  .arrow-label {
+    font-size: 11px;
+    color: #6b7280;
+    text-align: center;
+    margin-top: 4px;
+    max-width: 90px;
+  }
+
+  /* NHR 步骤展示 */
+  .nhr-steps {
+    display: flex;
+    gap: 16px;
+    align-items: center;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .nhr-step {
+    text-align: center;
+  }
+  .nhr-step .step-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: #6b7280;
+    margin-bottom: 6px;
+  }
+
+  /* 数据布局条 */
+  .data-bar {
+    display: flex;
+    height: 50px;
+    border-radius: 8px;
+    overflow: hidden;
+    border: 1px solid #d1d5db;
+    margin: 12px 0;
+  }
+  .data-bar-seg {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: #1a1a2e;
+    font-family: "Consolas", monospace;
+    position: relative;
+  }
+  .data-bar-seg.mesh { background: #dbeafe; border-right: 2px solid #3b82f6; }
+  .data-bar-seg.nhr { background: #fef3c7; }
+  .data-bar-label {
+    font-size: 12px;
+    color: #6b7280;
+    margin-bottom: 4px;
+    font-family: "Consolas", monospace;
+  }
+
+  /* 汇总表 */
+  .summary-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 10px;
+  }
+  .summary-table th, .summary-table td {
+    border: 1px solid #e5e7eb;
+    padding: 8px 12px;
+    text-align: center;
+  }
+  .summary-table th {
+    background: #f9fafb;
+    font-weight: 600;
+    color: #374151;
+  }
+  .summary-table td.highlight {
+    background: #fef3c7;
+    font-weight: 600;
+  }
+  .summary-table td.mesh-col { background: #eff6ff; }
+  .summary-table td.nhr-col { background: #fffbeb; }
+  .summary-table tr.total-row {
+    background: #f0fdf4;
+    font-weight: 600;
+  }
+
+  /* 代码块 */
+  .code-block {
+    background: #1e293b;
+    color: #e2e8f0;
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: "Consolas", "Monaco", monospace;
+    font-size: 12.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+    margin: 12px 0;
+  }
+  .code-block .kw { color: #c084fc; }
+  .code-block .str { color: #86efac; }
+  .code-block .cmt { color: #64748b; font-style: italic; }
+  .code-block .num { color: #fbbf24; }
+  .code-block .fn { color: #60a5fa; }
+
+  /* 图例 */
+  .legend {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+    padding: 12px 16px;
+    background: #f9fafb;
+    border-radius: 8px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: #4b5563;
+  }
+  .legend-swatch {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+  }
+
+  .note {
+    font-size: 12px;
+    color: #9ca3af;
+    margin-top: 12px;
+    line-height: 1.6;
+  }
+
+  /* 并发时序图容器 */
+  .gantt-container {
+    overflow-x: auto;
+    margin: 16px 0;
+    background: #fafbff;
+    border-radius: 8px;
+    padding: 16px;
+  }
+
+  /* 双栏对比 */
+  .dual-col {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    margin: 16px 0;
+  }
+  .dual-col > div {
+    flex: 1;
+    min-width: 300px;
+  }
+
+  /* 高亮提示框 */
+  .tip-box {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 12px 0;
+    font-size: 13px;
+    line-height: 1.7;
+    color: #166534;
+  }
+  .tip-box.warn {
+    background: #fef2f2;
+    border-color: #fecaca;
+    color: #991b1b;
+  }
+  .tip-box.info {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1e40af;
+  }
+  .tip-box b { color: inherit; }
+
+  /* 流程箭头链 */
+  .flow-chain {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 12px 0;
+    justify-content: center;
+  }
+  .flow-step {
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    font-family: "Consolas", monospace;
+  }
+  .flow-arrow {
+    color: #9ca3af;
+    font-size: 18px;
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <h1>HCCL AllReduce Concurrent Executor 数据传输过程</h1>
+  <div class="subtitle">4 rank · rank1 视角 · AICPU_TS 引擎 · 双模板并发：Mesh1D TwoShot + NHR（带宽比 11:10）</div>
+
+  <!-- ===== 条件设定 + 拓扑 ===== -->
+  <div class="top-bar">
+    <div class="info-box">
+      <h3>条件设定</h3>
+      <div class="val">rankSize = 4</div>
+      <div class="val">myRank = 1（从0计数）</div>
+      <div class="val">dataSize = ds</div>
+      <div class="val">engine = AICPU_TS</div>
+    </div>
+    <div class="info-box" style="flex: 2;">
+      <h3>4P UBX 拓扑（MESH_1D_CLOS，meshNum = closNum = 4）</h3>
+      <div class="topo-grid">
+        <div class="topo-server">
+          <div class="sname">rank0</div>
+          <div class="ranks">mesh idx: 0<br>clos idx: 0</div>
+          <span class="path-tag path-mesh">Mesh 直连</span>
+          <span class="path-tag path-clos">CLOS 交换</span>
+        </div>
+        <div class="topo-server highlight">
+          <div class="sname">rank1 ★（本rank）</div>
+          <div class="ranks">mesh idx: <span class="myrank">1</span><br>clos idx: <span class="myrank">1</span></div>
+          <span class="path-tag path-mesh">Mesh 直连</span>
+          <span class="path-tag path-clos">CLOS 交换</span>
+        </div>
+        <div class="topo-server">
+          <div class="sname">rank2</div>
+          <div class="ranks">mesh idx: 2<br>clos idx: 2</div>
+          <span class="path-tag path-mesh">Mesh 直连</span>
+          <span class="path-tag path-clos">CLOS 交换</span>
+        </div>
+        <div class="topo-server">
+          <div class="sname">rank3</div>
+          <div class="ranks">mesh idx: 3<br>clos idx: 3</div>
+          <span class="path-tag path-mesh">Mesh 直连</span>
+          <span class="path-tag path-clos">CLOS 交换</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== 注册信息 ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#0891b2;">📋</div>
+      <div class="step-title">Executor 注册信息（line 519-522）</div>
+    </div>
+    <div class="code-block">
+<span class="fn">REGISTER_EXECUTOR_BY_TWO_TEMPS</span>(
+    <span class="num">HcclCMDType::HCCL_CMD_ALLREDUCE</span>, <span class="str">InsAllReduceConcurrent</span>, <span class="fn">InsV2AllReduceConcurrentExecutor</span>, <span class="str">TopoMatchUBX</span>,
+    <span class="fn">InsTempAllReduceMesh1DTwoShot</span>, <span class="fn">InsTempAllReduceNHR</span>);
+<span class="cmt">} // namespace ops_hccl</span>
+    </div>
+    <table class="summary-table">
+      <thead>
+        <tr><th>参数</th><th>值</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>selectAlgName</b></td><td><code>InsAllReduceConcurrent</code></td><td>算法选择名称</td></tr>
+        <tr><td><b>Executor 类</b></td><td><code>InsV2AllReduceConcurrentExecutor</code></td><td>并发执行器</td></tr>
+        <tr><td><b>拓扑匹配</b></td><td><code>TopoMatchUBX</code></td><td>UBX 机型（MESH_1D_CLOS）</td></tr>
+        <tr><td><b>temp0</b></td><td><code>InsTempAllReduceMesh1DTwoShot</code></td><td class="mesh-col">Mesh1D 两步算法（框内 mesh 路径）</td></tr>
+        <tr><td><b>temp1</b></td><td><code>InsTempAllReduceNHR</code></td><td class="nhr-col">NHR 递归算法（CLOS 框间路径）</td></tr>
+      </tbody>
+    </table>
+    <div class="tip-box info">
+      <b>核心设计：</b>Concurrent Executor 将输入数据按带宽比例切分给两个模板，<b>temp0（Mesh）和 temp1（NHR）同时并发执行</b>，
+      各自完成 AllReduce 后将结果拼接回 output。区别于 Sequence 的四模板串行和 OmniPipe 的三级流水线。
+    </div>
+  </div>
+
+  <!-- ===== 数据切分与带宽分配 ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#7c3aed;">✂</div>
+      <div class="step-title">数据切分与带宽分配（AICPU_TS）</div>
+    </div>
+
+    <h3 class="sub-title">带宽常量与分配公式</h3>
+    <div class="code-block">
+<span class="cmt">// AICPU_TS 引擎等价带宽</span>
+portNum0 = <span class="num">MESH_BW_AICPU</span> = <span class="num">11</span>;   <span class="cmt">// mesh 等价带宽</span>
+portNum1 = <span class="num">CLOS_BW_AICPU</span> = <span class="num">10</span>;   <span class="cmt">// clos 等价带宽</span>
+
+<span class="cmt">// 数据按带宽比例分配（512B 对齐）</span>
+totalCounts = ds / dataTypeSize_;
+sliceAlignCount = <span class="num">HCCL_MIN_SLICE_ALIGN</span> / dataTypeSize_;
+totalCount0 = (totalCounts * <span class="num">11</span>) / (<span class="num">11</span> + <span class="num">10</span>) / sliceAlignCount * sliceAlignCount;  <span class="cmt">// ≈ 0.524 ds</span>
+totalCount1 = totalCounts - totalCount0;                                          <span class="cmt">// ≈ 0.476 ds</span>
+dataOffset  = totalCount0 * dataTypeSize_;                                         <span class="cmt">// temp1 偏移</span>
+    </div>
+
+    <h3 class="sub-title">input / output 数据布局</h3>
+    <div class="data-bar-label">inputPtr / outputPtr（单 rank，总大小 ds）</div>
+    <div class="data-bar">
+      <div class="data-bar-seg mesh" style="width: 52.4%;">
+        temp0 (Mesh) 数据区<br>≈ 0.524 ds<br>[0, dataOffset)
+      </div>
+      <div class="data-bar-seg nhr" style="width: 47.6%;">
+        temp1 (NHR) 数据区<br>≈ 0.476 ds<br>[dataOffset, ds)
+      </div>
+    </div>
+
+    <table class="summary-table">
+      <thead>
+        <tr><th>参数</th><th>公式</th><th>近似值</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>totalCount0</b></td><td>ds × 11/21（对齐调整）</td><td class="highlight mesh-col">≈ 0.524 ds</td><td>temp0 (Mesh) 分配</td></tr>
+        <tr><td><b>totalCount1</b></td><td>ds - totalCount0</td><td class="highlight nhr-col">≈ 0.476 ds</td><td>temp1 (NHR) 分配</td></tr>
+        <tr><td><b>dataOffset</b></td><td>totalCount0 × dataTypeSize_</td><td>≈ 0.524 ds</td><td>temp1 在 input/output 中的偏移</td></tr>
+        <tr><td><b>inBuffBaseOff (temp0)</b></td><td>0</td><td>0</td><td>temp0 输入基址偏移</td></tr>
+        <tr><td><b>inBuffBaseOff (temp1)</b></td><td>dataOffset</td><td>≈ 0.524 ds</td><td>temp1 输入基址偏移</td></tr>
+      </tbody>
+    </table>
+
+    <div class="tip-box">
+      <b>优化目标：</b>data_mesh / BW_mesh = data_clos / BW_clos → 两路同时完成。
+      11:10 = (物理带宽 × 算法效率)_mesh : (物理带宽 × 算法效率)_clos，
+      Mesh 直连带宽高且 3 路并行，NHR 有 PreCopy/PostCopy 开销但边传边算，综合净效率约 11:10。
+    </div>
+  </div>
+
+  <!-- ===== CCL Buffer 切分 ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#0891b2;">🧩</div>
+      <div class="step-title">CCL Buffer 切分与使用</div>
+    </div>
+
+    <h3 class="sub-title">ScratchMultiple 与 Buffer 比例</h3>
+    <div class="code-block">
+temp0ScratchMultiple = <span class="num">2</span>;  <span class="cmt">// Mesh1D TwoShot，RoundUp 切分需双倍</span>
+temp1ScratchMultiple = <span class="num">1</span>;  <span class="cmt">// NHR，向下取整，单倍即可</span>
+
+bufferRatioTerm0 = portNum0 * temp0ScratchMultiple = <span class="num">11</span> * <span class="num">2</span> = <span class="num">22</span>;
+bufferRatioTerm1 = portNum1 * temp1ScratchMultiple = <span class="num">10</span> * <span class="num">1</span> = <span class="num">10</span>;
+bufferRatio0 = <span class="num">22.0</span> / (<span class="num">22</span> + <span class="num">10</span>) = <span class="num">0.6875</span>;  <span class="cmt">// 68.75%</span>
+    </div>
+
+    <h3 class="sub-title">CCL Memory 布局</h3>
+    <div class="data-bar-label">cclMemAddr（总大小 cclMemSize）</div>
+    <div class="data-bar">
+      <div class="data-bar-seg mesh" style="width: 68.75%;">
+        cclMem0 → temp0 (Mesh)<br>68.75% of cclMemSize<br>hcclBuffBaseOff = 0
+      </div>
+      <div class="data-bar-seg nhr" style="width: 31.25%;">
+        cclMem1 → temp1 (NHR)<br>31.25% of cclMemSize<br>hcclBuffBaseOff = cclMem0.size
+      </div>
+    </div>
+
+    <h3 class="sub-title">maxCountPerLoop 与 Loop 交替下发</h3>
+    <div class="code-block">
+maxCountUBLimit = <span class="num">UB_MAX_DATA_SIZE</span> / dataTypeSize_;  <span class="cmt">// 256MB</span>
+maxCountPerLoop0 = min(maxCountUBLimit, cclMem0.size / <span class="num">2</span> / align * align / dataTypeSize_);
+maxCountPerLoop1 = min(maxCountUBLimit, cclMem1.size / <span class="num">1</span> / align * align / dataTypeSize_);
+
+<span class="kw">while</span> (countLeft0 > <span class="num">0</span> || countLeft1 > <span class="num">0</span>) {
+    <span class="kw">if</span> (countLeft0 > <span class="num">0</span>) { temp0-><span class="fn">KernelRun</span>(...); 推进偏移 }
+    <span class="kw">if</span> (countLeft1 > <span class="num">0</span>) { temp1-><span class="fn">KernelRun</span>(...); 推进偏移 }
+}
+    </div>
+    <div class="note">ds 足够小时 loopTimes0 = loopTimes1 = 1，各执行一次。本文后续按单 loop 分析。</div>
+  </div>
+
+  <!-- ===== temp0 Mesh1D TwoShot 传输过程 ===== -->
+  <div class="step step-transmission">
+    <div class="step-header">
+      <div class="step-num" style="background:#3b82f6;">M</div>
+      <div class="step-title">temp0：Mesh1D TwoShot 传输过程（AICPU，4 线程）</div>
+      <span class="step-tag tag-mesh">Mesh 直连</span>
+      <span class="step-tag tag-aicpu">AICPU_TS</span>
+    </div>
+    <div class="step-desc">
+      temp0 处理 <code>≈ 0.524 ds</code> 数据，切成 4 个 slice（各 <code>≈ 0.131 ds</code>）。
+      rank1（本 rank）负责 <code>slice1</code>。采用 ReduceScatter + AllGather 两步，3 个从线程并行 SendRecv，主线程做 LocalReduce。
+    </div>
+
+    <h3 class="sub-title">数据切片（4 rank × 4 slice）</h3>
+    <div style="text-align: center; margin-bottom: 16px;">
+      <div class="matrix">
+        <div class="matrix-row">
+          <div class="row-label">rank0</div>
+          <div class="cell c0">0|s0</div>
+          <div class="cell c1">0|s1</div>
+          <div class="cell c2">0|s2</div>
+          <div class="cell c3">0|s3</div>
+        </div>
+        <div class="matrix-row">
+          <div class="row-label myrank">rank1</div>
+          <div class="cell c0">1|s0</div>
+          <div class="cell c1">1|s1</div>
+          <div class="cell c2">1|s2</div>
+          <div class="cell c3">1|s3</div>
+        </div>
+        <div class="matrix-row">
+          <div class="row-label">rank2</div>
+          <div class="cell c0">2|s0</div>
+          <div class="cell c1">2|s1</div>
+          <div class="cell c2">2|s2</div>
+          <div class="cell c3">2|s3</div>
+        </div>
+        <div class="matrix-row">
+          <div class="row-label">rank3</div>
+          <div class="cell c0">3|s0</div>
+          <div class="cell c1">3|s1</div>
+          <div class="cell c2">3|s2</div>
+          <div class="cell c3">3|s3</div>
+        </div>
+      </div>
+    </div>
+    <div class="note" style="text-align: center;">每片 ≈ 0.131 ds；rank1 负责 slice1（橙色），即收集所有 rank 的 s1 并归约。</div>
+
+    <!-- ReduceScatter -->
+    <h3 class="sub-title">阶段一：ReduceScatter（ScatterData → ReduceData）</h3>
+    <div class="matrix-wrap">
+      <div class="matrix-block">
+        <div class="matrix-label">输入：<span class="buf-name">input[0, dataOffset)</span>（temp0 数据区）</div>
+        <div style="text-align: center;">
+          <div class="matrix">
+            <div class="matrix-row">
+              <div class="row-label">rank0</div>
+              <div class="cell c0">0|s0</div>
+              <div class="cell c1">0|s1</div>
+              <div class="cell c2">0|s2</div>
+              <div class="cell c3">0|s3</div>
+            </div>
+            <div class="matrix-row">
+              <div class="row-label myrank">rank1</div>
+              <div class="cell c0">1|s0</div>
+              <div class="cell c1">1|s1</div>
+              <div class="cell c2">1|s2</div>
+              <div class="cell c3">1|s3</div>
+            </div>
+            <div class="matrix-row">
+              <div class="row-label">rank2</div>
+              <div class="cell c0">2|s0</div>
+              <div class="cell c1">2|s1</div>
+              <div class="cell c2">2|s2</div>
+              <div class="cell c3">2|s3</div>
+            </div>
+            <div class="matrix-row">
+              <div class="row-label">rank3</div>
+              <div class="cell c0">3|s0</div>
+              <div class="cell c1">3|s1</div>
+              <div class="cell c2">3|s2</div>
+              <div class="cell c3">3|s3</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col">
+        <div class="arrow">→</div>
+        <div class="arrow-label">ScatterData<br>3从线程并行<br>SendRecvBatchWrite<br>+ LocalCopy</div>
+      </div>
+
+      <div class="matrix-block">
+        <div class="matrix-label">rank1 的 <span class="buf-name">hcclBuff[0..3]</span>（收集各 rank 的 s1）</div>
+        <div style="text-align: center;">
+          <div class="matrix">
+            <div class="matrix-row">
+              <div class="row-label" style="width:90px;">hcclBuff[0]</div>
+              <div class="cell c1" style="width:120px;">0|s1 ← rank0</div>
+            </div>
+            <div class="matrix-row">
+              <div class="row-label myrank" style="width:90px;">hcclBuff[1]</div>
+              <div class="cell c1" style="width:120px;">1|s1 (LocalCopy)</div>
+            </div>
+            <div class="matrix-row">
+              <div class="row-label" style="width:90px;">hcclBuff[2]</div>
+              <div class="cell c1" style="width:120px;">2|s1 ← rank2</div>
+            </div>
+            <div class="matrix-row">
+              <div class="row-label" style="width:90px;">hcclBuff[3]</div>
+              <div class="cell c1" style="width:120px;">3|s1 ← rank3</div>
+            </div>
+          </div>
+        </div>
+        <div class="note" style="text-align: center;">→ ReduceData：hcclBuff[0] = Σ(hcclBuff[0..3])，3 次 LocalReduce</div>
+      </div>
+    </div>
+
+    <div class="tip-box info" style="margin-top: 16px;">
+      <b>ScatterData 并行细节（rank1 视角）：</b><br>
+      • threads_[1]（remoteIdx=0, rank0）：发送 1|s0 → rank0；接收 0|s1 → hcclBuff[0]<br>
+      • threads_[1]（remoteIdx=1, 本地）：LocalCopy 1|s1 → hcclBuff[1]<br>
+      • threads_[2]（remoteIdx=2, rank2）：发送 1|s2 → rank2；接收 2|s1 → hcclBuff[2]<br>
+      • threads_[3]（remoteIdx=3, rank3）：发送 1|s3 → rank3；接收 3|s1 → hcclBuff[3]<br>
+      发送 = 接收 = 3 × 0.131 ds ≈ <b>0.393 ds</b>
+    </div>
+
+    <!-- AllGather -->
+    <h3 class="sub-title">阶段二：AllGather（GatherData）</h3>
+    <div class="matrix-wrap">
+      <div class="matrix-block">
+        <div class="matrix-label">rank1 的 <span class="buf-name">hcclBuff[0]</span>（slice1 归约结果）</div>
+        <div style="text-align: center;">
+          <div class="matrix">
+            <div class="matrix-row">
+              <div class="row-label" style="width:90px;">hcclBuff[0]</div>
+              <div class="cell sum c1-sum" style="width:200px;">SUM(s1) = Σ(0/1/2/3 | s1)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col">
+        <div class="arrow">→</div>
+        <div class="arrow-label">GatherData<br>3从线程并行<br>SendRecvBatchRead<br>+ LocalCopy</div>
+      </div>
+
+      <div class="matrix-block">
+        <div class="matrix-label">输出：<span class="buf-name">output[0, dataOffset)</span>（temp0 完整结果）</div>
+        <div style="text-align: center;">
+          <div class="matrix">
+            <div class="matrix-row">
+              <div class="row-label myrank">rank1</div>
+              <div class="cell sum c0-sum">SUM s0</div>
+              <div class="cell sum c1-sum">SUM s1</div>
+              <div class="cell sum c2-sum">SUM s2</div>
+              <div class="cell sum c3-sum">SUM s3</div>
+            </div>
+          </div>
+        </div>
+        <div class="note" style="text-align: center;">rank1 得到 temp0 完整 AllReduce 结果 ≈ 0.524 ds</div>
+      </div>
+    </div>
+
+    <div class="tip-box info" style="margin-top: 16px;">
+      <b>GatherData 并行细节（rank1 视角）：</b><br>
+      • threads_[1]（rank0）：发送 hcclBuff[0](SUM s1) → rank0 output[s1]；接收 rank0 hcclBuff[0](SUM s0) → output[s0]<br>
+      • threads_[1]（本地）：LocalCopy hcclBuff[0] → output[s1]<br>
+      • threads_[2]（rank2）：发送 SUM s1 → rank2；接收 SUM s2 → output[s2]<br>
+      • threads_[3]（rank3）：发送 SUM s1 → rank3；接收 SUM s3 → output[s3]<br>
+      发送 = 接收 = 3 × 0.131 ds ≈ <b>0.393 ds</b>
+    </div>
+
+    <h3 class="sub-title">temp0 传输量汇总</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>操作</th><th>阶段</th><th>数据量</th><th>线程</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>发送（Write）</td><td>RS ScatterData</td><td>3 × 0.131 ds ≈ 0.393 ds</td><td>threads_[1,2,3]</td></tr>
+        <tr><td>接收（Write）</td><td>RS ScatterData</td><td>3 × 0.131 ds ≈ 0.393 ds</td><td>threads_[1,2,3]</td></tr>
+        <tr><td>LocalCopy</td><td>RS ScatterData</td><td>1 × 0.131 ds ≈ 0.131 ds</td><td>threads_[1]</td></tr>
+        <tr><td>LocalReduce</td><td>RS ReduceData</td><td>3 × 0.131 ds ≈ 0.393 ds</td><td>threads_[0] 主线程</td></tr>
+        <tr><td>发送（Read）</td><td>AG GatherData</td><td>3 × 0.131 ds ≈ 0.393 ds</td><td>threads_[1,2,3]</td></tr>
+        <tr><td>接收（Read）</td><td>AG GatherData</td><td>3 × 0.131 ds ≈ 0.393 ds</td><td>threads_[1,2,3]</td></tr>
+        <tr><td>LocalCopy</td><td>AG GatherData</td><td>1 × 0.131 ds ≈ 0.131 ds</td><td>threads_[1]</td></tr>
+        <tr class="total-row"><td colspan="2">总发送 / 总接收</td><td>0.786 ds / 0.786 ds</td><td>4 线程（1主+3从）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ===== temp1 NHR 传输过程 ===== -->
+  <div class="step step-transmission">
+    <div class="step-header">
+      <div class="step-num" style="background:#f59e0b;">N</div>
+      <div class="step-title">temp1：NHR 传输过程（AICPU_TS，单线程）</div>
+      <span class="step-tag tag-nhr">NHR 递归</span>
+      <span class="step-tag tag-aicpu">AICPU_TS</span>
+    </div>
+    <div class="step-desc">
+      temp1 处理 <code>≈ 0.476 ds</code> 数据，切成 4 个 slice（各 <code>≈ 0.119 ds</code>，向下取整，tail 可能略大）。
+      rank1 负责 <code>slice1</code>。采用 N-Halving and Doubling 算法，<code>nSteps = log₂(4) = 2</code>，
+      仅主线程 threads_[4] 参与（channelsPerRank_ = 1）。
+    </div>
+
+    <h3 class="sub-title">PreCopy：input → hcclBuff</h3>
+    <div class="flow-chain">
+      <div class="flow-step" style="background:#dbeafe; color:#1e40af;">input[dataOffset, ds)<br>≈ 0.476 ds</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="background:#fef3c7; color:#92400e;">LocalCopy<br>(threads_[4])</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="background:#cffafe; color:#155e75;">hcclBuff (cclMem1)<br>≈ 0.476 ds</div>
+    </div>
+
+    <h3 class="sub-title">阶段一：NHR ReduceScatter（递归减半，2 步）</h3>
+
+    <div class="nhr-steps">
+      <!-- 起始 -->
+      <div class="nhr-step">
+        <div class="step-name">起始（各持完整 4 slice）</div>
+        <div class="matrix">
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank0</div>
+            <div class="cell n0" style="width:50px;">0|s0</div>
+            <div class="cell n1" style="width:50px;">0|s1</div>
+            <div class="cell n2" style="width:50px;">0|s2</div>
+            <div class="cell n3" style="width:50px;">0|s3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label myrank" style="width:55px;">rank1</div>
+            <div class="cell n0" style="width:50px;">1|s0</div>
+            <div class="cell n1" style="width:50px;">1|s1</div>
+            <div class="cell n2" style="width:50px;">1|s2</div>
+            <div class="cell n3" style="width:50px;">1|s3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank2</div>
+            <div class="cell n0" style="width:50px;">2|s0</div>
+            <div class="cell n1" style="width:50px;">2|s1</div>
+            <div class="cell n2" style="width:50px;">2|s2</div>
+            <div class="cell n3" style="width:50px;">2|s3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank3</div>
+            <div class="cell n0" style="width:50px;">3|s0</div>
+            <div class="cell n1" style="width:50px;">3|s1</div>
+            <div class="cell n2" style="width:50px;">3|s2</div>
+            <div class="cell n3" style="width:50px;">3|s3</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col" style="min-width:50px;">
+        <div class="arrow">→</div>
+        <div class="arrow-label">Step0<br>deltaRank=1<br>rank1→rank0<br>rank1←rank2</div>
+      </div>
+
+      <!-- Step0 后 -->
+      <div class="nhr-step">
+        <div class="step-name">Step0 后（rank1 接收rank2 s1-s3）</div>
+        <div class="matrix">
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank0</div>
+            <div class="cell n0" style="width:50px;">0+1|s0</div>
+            <div class="cell n1" style="width:50px;">s1</div>
+            <div class="cell n2" style="width:50px;">0+1|s2</div>
+            <div class="cell n3" style="width:50px;">s3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label myrank" style="width:55px;">rank1</div>
+            <div class="cell n0" style="width:50px;">s0</div>
+            <div class="cell n1" style="width:50px;">1+2|s1</div>
+            <div class="cell n2" style="width:50px;">s2</div>
+            <div class="cell n3" style="width:50px;">1+2|s3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank2</div>
+            <div class="cell n0" style="width:50px;">2+3|s0</div>
+            <div class="cell n1" style="width:50px;">s1</div>
+            <div class="cell n2" style="width:50px;">2+3|s2</div>
+            <div class="cell n3" style="width:50px;">s3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank3</div>
+            <div class="cell n0" style="width:50px;">s0</div>
+            <div class="cell n1" style="width:50px;">3+0|s1</div>
+            <div class="cell n2" style="width:50px;">s2</div>
+            <div class="cell n3" style="width:50px;">3+0|s3</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col" style="min-width:50px;">
+        <div class="arrow">→</div>
+        <div class="arrow-label">Step1<br>deltaRank=2<br>rank1↔rank3</div>
+      </div>
+
+      <!-- Step1 后（RS 完成） -->
+      <div class="nhr-step">
+        <div class="step-name">RS 完成（rank1 仅持 Σs1）</div>
+        <div class="matrix">
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank0</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label myrank" style="width:55px;">rank1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank2</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank3</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tip-box info" style="margin-top: 16px;">
+      <b>NHR RS 步骤详解（rank1）：</b><br>
+      • <b>Step0（deltaRank=1）</b>：sendTo=rank0, recvFrom=rank2, txSlice=[0,2], rxSlice=[1,3]（带 reduce）<br>
+      &nbsp;&nbsp;发送 2×0.119 ds ≈ 0.238 ds → rank0；接收 2×0.119 ds ≈ 0.238 ds ← rank2（边收边 reduce）<br>
+      • <b>Step1（deltaRank=2）</b>：sendTo=rank3, recvFrom=rank3, txSlice=[3], rxSlice=[1]（带 reduce）<br>
+      &nbsp;&nbsp;发送 1×0.119 ds ≈ 0.119 ds → rank3；接收 1×0.119 ds ≈ 0.119 ds ← rank3（边收边 reduce）<br>
+      RS 发送 = RS 接收 = <b>0.357 ds</b>（接收带 reduce，无需额外 LocalReduce）
+    </div>
+
+    <h3 class="sub-title">阶段二：NHR AllGather（递归倍增，2 步）</h3>
+
+    <div class="nhr-steps">
+      <!-- 起始（RS 结果） -->
+      <div class="nhr-step">
+        <div class="step-name">起始（各持 1 个归约 slice）</div>
+        <div class="matrix">
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank0</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label myrank" style="width:55px;">rank1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank2</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank3</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col" style="min-width:50px;">
+        <div class="arrow">→</div>
+        <div class="arrow-label">Step0<br>deltaRank=2<br>rank1↔rank3<br>交换 s1,s3</div>
+      </div>
+
+      <!-- Step0 后 -->
+      <div class="nhr-step">
+        <div class="step-name">Step0 后（rank1 持 s1,s3）</div>
+        <div class="matrix">
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank0</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label myrank" style="width:55px;">rank1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank2</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell empty" style="width:50px;"></div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank3</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell empty" style="width:50px;"></div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="arrow-col" style="min-width:50px;">
+        <div class="arrow">→</div>
+        <div class="arrow-label">Step1<br>deltaRank=1<br>rank1→rank2<br>rank1←rank0<br>交换 s0,s2</div>
+      </div>
+
+      <!-- Step1 后（AG 完成） -->
+      <div class="nhr-step">
+        <div class="step-name">AG 完成（各持全部 4 slice）</div>
+        <div class="matrix">
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank0</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label myrank" style="width:55px;">rank1</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank2</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+          <div class="matrix-row">
+            <div class="row-label" style="width:55px;">rank3</div>
+            <div class="cell sum n0-sum" style="width:50px;">Σs0</div>
+            <div class="cell sum n1-sum" style="width:50px;">Σs1</div>
+            <div class="cell sum n2-sum" style="width:50px;">Σs2</div>
+            <div class="cell sum n3-sum" style="width:50px;">Σs3</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="tip-box info" style="margin-top: 16px;">
+      <b>NHR AG 步骤详解（rank1）：</b><br>
+      • <b>Step0（deltaRank=2）</b>：sendTo=rank3, recvFrom=rank3, txSlice=[1], rxSlice=[3]<br>
+      &nbsp;&nbsp;发送 0.119 ds → rank3；接收 0.119 ds ← rank3<br>
+      • <b>Step1（deltaRank=1）</b>：sendTo=rank2, recvFrom=rank0, txSlice=[1,3], rxSlice=[0,2]<br>
+      &nbsp;&nbsp;发送 2×0.119 ds ≈ 0.238 ds → rank2；接收 2×0.119 ds ≈ 0.238 ds ← rank0<br>
+      AG 发送 = AG 接收 = <b>0.357 ds</b>
+    </div>
+
+    <h3 class="sub-title">PostCopy：hcclBuff → output</h3>
+    <div class="flow-chain">
+      <div class="flow-step" style="background:#cffafe; color:#155e75;">hcclBuff (cclMem1)<br>完整结果 ≈ 0.476 ds</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="background:#fef3c7; color:#92400e;">LocalCopy<br>(threads_[4])</div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-step" style="background:#dbeafe; color:#1e40af;">output[dataOffset, ds)<br>≈ 0.476 ds</div>
+    </div>
+
+    <h3 class="sub-title">temp1 传输量汇总</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>操作</th><th>阶段</th><th>数据量</th><th>线程</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PreCopy (LocalCopy)</td><td>准备</td><td>≈ 0.476 ds</td><td>threads_[4]</td></tr>
+        <tr><td>RS 发送</td><td>Step0 + Step1</td><td>0.238 + 0.119 = 0.357 ds</td><td>threads_[4]</td></tr>
+        <tr><td>RS 接收（带 reduce）</td><td>Step0 + Step1</td><td>0.238 + 0.119 = 0.357 ds</td><td>threads_[4]</td></tr>
+        <tr><td>AG 发送</td><td>Step0 + Step1</td><td>0.119 + 0.238 = 0.357 ds</td><td>threads_[4]</td></tr>
+        <tr><td>AG 接收</td><td>Step0 + Step1</td><td>0.119 + 0.238 = 0.357 ds</td><td>threads_[4]</td></tr>
+        <tr><td>PostCopy (LocalCopy)</td><td>收尾</td><td>≈ 0.476 ds</td><td>threads_[4]</td></tr>
+        <tr class="total-row"><td colspan="2">总发送 / 总接收（不含拷贝）</td><td>0.714 ds / 0.714 ds</td><td>1 线程（仅主线程）</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ===== 并发执行时序图（核心特色） ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#be185d;">⇉</div>
+      <div class="step-title">并发执行时序图（核心：双模板同时运行）</div>
+      <span class="step-tag tag-concurrent">Concurrent</span>
+      <span class="step-tag tag-sync">6 个同步点</span>
+    </div>
+    <div class="step-desc">
+      <code>OrchestrateLoop</code> 中，模板间前同步后，<b>temp0（threads_[0..3]）和 temp1（threads_[4]）同时并发执行</b>，
+      各自完成 KernelRun 后通过模板间尾同步汇合。这是 Concurrent Executor 区别于 Sequence（串行）和 OmniPipe（流水线）的核心特征。
+    </div>
+
+    <div class="gantt-container">
+      <svg width="1200" height="580" viewBox="0 0 1200 580" xmlns="http://www.w3.org/2000/svg" style="font-family: 'Consolas', 'Monaco', monospace;">
+        <!-- 背景 -->
+        <rect x="0" y="0" width="1200" height="580" fill="#fafbff" rx="8"/>
+
+        <!-- 并发区域绿色背景（temp0 内部执行期 ②RS PreSync ~ ⑤AG PostSync，此区间双模板并发运行） -->
+        <rect x="350" y="58" width="750" height="462" fill="#f0fdf4" opacity="0.5" rx="6"/>
+        <text x="355" y="50" font-size="13" font-weight="700" fill="#15803d" text-anchor="left">◀──────────────────────────────────────  temp0 与 temp1 并发执行  ──────────────────────────────────────▶</text>
+
+        <!-- 泳道标签 -->
+        <text x="65" y="92" font-size="13" font-weight="700" fill="#1e40af" text-anchor="middle">threads_[0]</text>
+        <text x="65" y="108" font-size="11" fill="#6b7280" text-anchor="middle">temp0 主线程</text>
+
+        <text x="65" y="192" font-size="13" font-weight="700" fill="#3b82f6" text-anchor="middle">threads_[1]</text>
+        <text x="65" y="208" font-size="11" fill="#6b7280" text-anchor="middle">temp0 从线程0</text>
+
+        <text x="65" y="292" font-size="13" font-weight="700" fill="#3b82f6" text-anchor="middle">threads_[2]</text>
+        <text x="65" y="308" font-size="11" fill="#6b7280" text-anchor="middle">temp0 从线程1</text>
+
+        <text x="65" y="392" font-size="13" font-weight="700" fill="#3b82f6" text-anchor="middle">threads_[3]</text>
+        <text x="65" y="408" font-size="11" fill="#6b7280" text-anchor="middle">temp0 从线程2</text>
+
+        <text x="65" y="492" font-size="13" font-weight="700" fill="#b45309" text-anchor="middle">threads_[4]</text>
+        <text x="65" y="508" font-size="11" fill="#6b7280" text-anchor="middle">temp1 主线程</text>
+
+        <!-- ===== 同步点垂直虚线 + 顶部圆圈数字（与任务块中心精确对齐） ===== -->
+        <!-- ① 模板间前同步 x=295 -->
+        <line x1="295" y1="80" x2="295" y2="510" stroke="#dc2626" stroke-width="2" stroke-dasharray="6,4"/>
+        <circle cx="295" cy="62" r="11" fill="#dc2626"/>
+        <text x="295" y="66" font-size="12" font-weight="700" fill="#fff" text-anchor="middle">①</text>
+
+        <!-- ② RS PreSync（主→从）x=400 -->
+        <line x1="400" y1="80" x2="400" y2="410" stroke="#4f46e5" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <circle cx="400" cy="62" r="10" fill="#4f46e5"/>
+        <text x="400" y="66" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">②</text>
+
+        <!-- ③ RS PostSync（从→主）x=625 -->
+        <line x1="625" y1="80" x2="625" y2="410" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <circle cx="625" cy="62" r="10" fill="#7c3aed"/>
+        <text x="625" y="66" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">③</text>
+
+        <!-- ④ AG PreSync（主→从）x=830 -->
+        <line x1="830" y1="80" x2="830" y2="410" stroke="#4f46e5" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <circle cx="830" cy="62" r="10" fill="#4f46e5"/>
+        <text x="830" y="66" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">④</text>
+
+        <!-- ⑤ AG PostSync（从→主）x=1055 -->
+        <line x1="1055" y1="80" x2="1055" y2="410" stroke="#7c3aed" stroke-width="1.5" stroke-dasharray="5,3"/>
+        <circle cx="1055" cy="62" r="10" fill="#7c3aed"/>
+        <text x="1055" y="66" font-size="11" font-weight="700" fill="#fff" text-anchor="middle">⑤</text>
+
+        <!-- ⑥ 模板间后同步 x=1145 -->
+        <line x1="1145" y1="80" x2="1145" y2="510" stroke="#dc2626" stroke-width="2" stroke-dasharray="6,4"/>
+        <circle cx="1145" cy="62" r="11" fill="#dc2626"/>
+        <text x="1145" y="66" font-size="12" font-weight="700" fill="#fff" text-anchor="middle">⑥</text>
+
+        <!-- ===== threads_[0] temp0 主线程（所有同步块中心对齐虚线） ===== -->
+        <rect x="150" y="79" width="90" height="32" rx="5" fill="#e5e7eb"/>
+        <text x="195" y="99" font-size="11" fill="#4b5563" text-anchor="middle">准备</text>
+
+        <rect x="250" y="79" width="90" height="32" rx="5" fill="#dc2626"/>
+        <text x="295" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">①前同步</text>
+
+        <rect x="355" y="79" width="90" height="32" rx="5" fill="#4f46e5"/>
+        <text x="400" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">②RS PreSync</text>
+
+        <rect x="455" y="79" width="120" height="32" rx="5" fill="#e5e7eb"/>
+        <text x="515" y="99" font-size="11" fill="#6b7280" text-anchor="middle">等待从线程 Scatter</text>
+
+        <rect x="580" y="79" width="90" height="32" rx="5" fill="#7c3aed"/>
+        <text x="625" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">③RS PostSync</text>
+
+        <rect x="680" y="79" width="90" height="32" rx="5" fill="#8b5cf6"/>
+        <text x="725" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">ReduceData</text>
+
+        <rect x="785" y="79" width="90" height="32" rx="5" fill="#4f46e5"/>
+        <text x="830" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">④AG PreSync</text>
+
+        <rect x="885" y="79" width="120" height="32" rx="5" fill="#e5e7eb"/>
+        <text x="945" y="99" font-size="11" fill="#6b7280" text-anchor="middle">等待从线程 Gather</text>
+
+        <rect x="1010" y="79" width="90" height="32" rx="5" fill="#7c3aed"/>
+        <text x="1055" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">⑤AG PostSync</text>
+
+        <rect x="1100" y="79" width="90" height="32" rx="5" fill="#dc2626"/>
+        <text x="1145" y="99" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">⑥后同步</text>
+
+        <!-- ===== threads_[1] temp0 从线程0 ===== -->
+        <rect x="150" y="179" width="295" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="297" y="199" font-size="11" fill="#9ca3af" text-anchor="middle">空闲，等待 ②PreSync 唤醒</text>
+
+        <rect x="455" y="179" width="120" height="32" rx="5" fill="#93c5fd"/>
+        <text x="515" y="199" font-size="10" font-weight="600" fill="#1e3a8a" text-anchor="middle">ScatterData(rank0+本地)</text>
+
+        <rect x="580" y="179" width="305" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="732" y="199" font-size="11" fill="#9ca3af" text-anchor="middle">③PostSync 回报 → 等待 ④PreSync</text>
+
+        <rect x="885" y="179" width="120" height="32" rx="5" fill="#93c5fd"/>
+        <text x="945" y="199" font-size="10" font-weight="600" fill="#1e3a8a" text-anchor="middle">GatherData(rank0+本地)</text>
+
+        <rect x="1010" y="179" width="180" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="1100" y="199" font-size="11" fill="#9ca3af" text-anchor="middle">⑤PostSync 回报</text>
+
+        <!-- ===== threads_[2] temp0 从线程1 ===== -->
+        <rect x="150" y="279" width="295" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="297" y="299" font-size="11" fill="#9ca3af" text-anchor="middle">空闲，等待 ②PreSync 唤醒</text>
+
+        <rect x="455" y="279" width="120" height="32" rx="5" fill="#93c5fd"/>
+        <text x="515" y="299" font-size="11" font-weight="600" fill="#1e3a8a" text-anchor="middle">ScatterData(rank2)</text>
+
+        <rect x="580" y="279" width="305" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="732" y="299" font-size="11" fill="#9ca3af" text-anchor="middle">③PostSync 回报 → 等待 ④PreSync</text>
+
+        <rect x="885" y="279" width="120" height="32" rx="5" fill="#93c5fd"/>
+        <text x="945" y="299" font-size="11" font-weight="600" fill="#1e3a8a" text-anchor="middle">GatherData(rank2)</text>
+
+        <rect x="1010" y="279" width="180" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="1100" y="299" font-size="11" fill="#9ca3af" text-anchor="middle">⑤PostSync 回报</text>
+
+        <!-- ===== threads_[3] temp0 从线程2 ===== -->
+        <rect x="150" y="379" width="295" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="297" y="399" font-size="11" fill="#9ca3af" text-anchor="middle">空闲，等待 ②PreSync 唤醒</text>
+
+        <rect x="455" y="379" width="120" height="32" rx="5" fill="#93c5fd"/>
+        <text x="515" y="399" font-size="11" font-weight="600" fill="#1e3a8a" text-anchor="middle">ScatterData(rank3)</text>
+
+        <rect x="580" y="379" width="305" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="732" y="399" font-size="11" fill="#9ca3af" text-anchor="middle">③PostSync 回报 → 等待 ④PreSync</text>
+
+        <rect x="885" y="379" width="120" height="32" rx="5" fill="#93c5fd"/>
+        <text x="945" y="399" font-size="11" font-weight="600" fill="#1e3a8a" text-anchor="middle">GatherData(rank3)</text>
+
+        <rect x="1010" y="379" width="180" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="1100" y="399" font-size="11" fill="#9ca3af" text-anchor="middle">⑤PostSync 回报</text>
+
+        <!-- ===== threads_[4] temp1 主线程（与 temp0 并发，多色系，步骤加宽减少等待） ===== -->
+        <rect x="150" y="479" width="90" height="32" rx="5" fill="#f3f4f6"/>
+        <text x="195" y="499" font-size="11" fill="#9ca3af" text-anchor="middle">空闲</text>
+
+        <rect x="250" y="479" width="100" height="32" rx="5" fill="#fbbf24"/>
+        <text x="300" y="499" font-size="11" font-weight="600" fill="#78350f" text-anchor="middle">PreCopy</text>
+
+        <rect x="360" y="479" width="110" height="32" rx="5" fill="#22d3ee"/>
+        <text x="415" y="499" font-size="11" font-weight="600" fill="#164e63" text-anchor="middle">RS Step0 (δ=1)</text>
+
+        <rect x="480" y="479" width="100" height="32" rx="5" fill="#06b6d4"/>
+        <text x="530" y="499" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">RS Step1 (δ=2)</text>
+
+        <rect x="590" y="479" width="100" height="32" rx="5" fill="#f472b6"/>
+        <text x="640" y="499" font-size="11" font-weight="600" fill="#831843" text-anchor="middle">AG Step0 (δ=2)</text>
+
+        <rect x="700" y="479" width="110" height="32" rx="5" fill="#ec4899"/>
+        <text x="755" y="499" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">AG Step1 (δ=1)</text>
+
+        <rect x="820" y="479" width="100" height="32" rx="5" fill="#fbbf24"/>
+        <text x="870" y="499" font-size="11" font-weight="600" fill="#78350f" text-anchor="middle">PostCopy</text>
+
+        <rect x="930" y="479" width="160" height="32" rx="5" fill="#e5e7eb"/>
+        <text x="1010" y="499" font-size="11" fill="#6b7280" text-anchor="middle">temp1 完成，等待 temp0</text>
+
+        <rect x="1100" y="479" width="90" height="32" rx="5" fill="#dc2626"/>
+        <text x="1145" y="499" font-size="11" font-weight="600" fill="#fff" text-anchor="middle">⑥后同步</text>
+
+        <!-- 底部说明 -->
+        <text x="600" y="545" font-size="12" fill="#4b5563" text-anchor="middle">
+          红色块/虚线 = 模板间同步（①前同步：threads_[0] 唤醒 threads_[4]；⑥后同步：threads_[4] 回报 threads_[0]，两者同时汇合）
+        </text>
+        <text x="600" y="565" font-size="12" fill="#4b5563" text-anchor="middle">
+          靛色虚线 = temp0 内部 PreSync（主→从，唤醒从线程）；紫色虚线 = temp0 内部 PostSync（从→主，回报主线程）
+        </text>
+
+        <!-- 箭头定义（已移除：方向由颜色+底部说明表达） -->
+        <defs></defs>
+      </svg>
+    </div>
+
+    <div class="tip-box warn">
+      <b>关键区别：</b><br>
+      • <b>Sequence Executor</b>：4 模板串行（Intra RS → Inter RS → Inter AG → Intra AG），总时间 = 各步之和<br>
+      • <b>OmniPipe Executor</b>：三级流水线（切 chunk 流水），有填充/排空开销<br>
+      • <b>Concurrent Executor</b>：2 模板<b>完全并发</b>，总时间 ≈ max(temp0时间, temp1时间)，通过带宽比例分配使两路同时完成
+    </div>
+  </div>
+
+  <!-- ===== 线程与 Notify 同步机制 ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#7c3aed;">⚙</div>
+      <div class="step-title">线程与 Notify 同步机制</div>
+    </div>
+
+    <h3 class="sub-title">资源计算（CalcRes）</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>资源</th><th>temp0 (Mesh)</th><th>temp1 (NHR)</th><th>Executor 汇总</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>slaveThreadNum</b></td><td>3</td><td>0</td><td class="highlight">3 + 0 + 1 = 4</td></tr>
+        <tr><td><b>总线程数</b></td><td>4（1主+3从）</td><td>1（仅主）</td><td class="highlight">5（threads_[0..4]）</td></tr>
+        <tr><td><b>notifyNumOnMainThread</b></td><td>3</td><td>0</td><td class="highlight">3 + 1 = 4（+1模板间）</td></tr>
+        <tr><td><b>notifyNumPerThread</b></td><td>[1,1,1]</td><td>[]</td><td class="highlight">[1,1,1,1]（+temp1主线程）</td></tr>
+        <tr><td><b>Channel 数</b></td><td>3（到rank0/2/3）</td><td>NHR MultiJetty计算</td><td>合并存入 channels[0]</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="sub-title">线程分配</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>线程</th><th>归属模板</th><th>角色</th><th>职责</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>threads_[0]</code></td>
+          <td class="mesh-col">temp0 (Mesh)</td>
+          <td>主线程（Executor 主线程）</td>
+          <td>PreSync/PostSync 调度 + ReduceData 本地归约</td>
+        </tr>
+        <tr>
+          <td><code>threads_[1]</code></td>
+          <td class="mesh-col">temp0 (Mesh)</td>
+          <td>从线程 0</td>
+          <td>ScatterData/GatherData：处理 rank0 + 本地 LocalCopy</td>
+        </tr>
+        <tr>
+          <td><code>threads_[2]</code></td>
+          <td class="mesh-col">temp0 (Mesh)</td>
+          <td>从线程 1</td>
+          <td>ScatterData/GatherData：处理 rank2</td>
+        </tr>
+        <tr>
+          <td><code>threads_[3]</code></td>
+          <td class="mesh-col">temp0 (Mesh)</td>
+          <td>从线程 2</td>
+          <td>ScatterData/GatherData：处理 rank3</td>
+        </tr>
+        <tr>
+          <td><code>threads_[4]</code></td>
+          <td class="nhr-col">temp1 (NHR)</td>
+          <td>主线程（Executor 视角为"从线程"）</td>
+          <td>单线程串行完成全部 NHR：PreCopy → RS → AG → PostCopy</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3 class="sub-title">Notify 资源分配</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>线程</th><th>Notify 索引</th><th>用途</th><th>同步方向</th></tr>
+      </thead>
+      <tbody>
+        <tr><td rowspan="4"><b>threads_[0]</b><br>temp0主线程</td><td>0</td><td>temp0 从线程0 完成回报</td><td>从→主</td></tr>
+        <tr><td>1</td><td>temp0 从线程1 完成回报</td><td>从→主</td></tr>
+        <tr><td>2</td><td>temp0 从线程2 完成回报</td><td>从→主</td></tr>
+        <tr><td>3</td><td>temp1 主线程完成回报（模板间尾同步）</td><td>从→主</td></tr>
+        <tr><td><b>threads_[1]</b><br>temp0从0</td><td>0</td><td>主线程唤醒（RS/AG PreSync）</td><td>主→从</td></tr>
+        <tr><td><b>threads_[2]</b><br>temp0从1</td><td>0</td><td>主线程唤醒（RS/AG PreSync）</td><td>主→从</td></tr>
+        <tr><td><b>threads_[3]</b><br>temp0从2</td><td>0</td><td>主线程唤醒（RS/AG PreSync）</td><td>主→从</td></tr>
+        <tr><td><b>threads_[4]</b><br>temp1主线程</td><td>0</td><td>主线程唤醒（模板间前同步）</td><td>主→从</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="sub-title">6 个同步点汇总</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>#</th><th>同步</th><th>方向</th><th>Notify 索引</th><th>触发时机</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>①</b></td><td>模板间前同步</td><td>threads_[0] → [4]</td><td>[4].notify[0]</td><td>Loop 开始前，唤醒 temp1</td></tr>
+        <tr><td><b>②</b></td><td>temp0 RS PreSync</td><td>threads_[0] → [1,2,3]</td><td>各.notify[0]</td><td>ScatterData 前</td></tr>
+        <tr><td><b>③</b></td><td>temp0 RS PostSync</td><td>threads_[1,2,3] → [0]</td><td>[0].notify[0,1,2]</td><td>ScatterData 后，ReduceData 前</td></tr>
+        <tr><td><b>④</b></td><td>temp0 AG PreSync</td><td>threads_[0] → [1,2,3]</td><td>各.notify[0]</td><td>GatherData 前</td></tr>
+        <tr><td><b>⑤</b></td><td>temp0 AG PostSync</td><td>threads_[1,2,3] → [0]</td><td>[0].notify[0,1,2]</td><td>GatherData 后</td></tr>
+        <tr><td><b>⑥</b></td><td>模板间尾同步</td><td>threads_[4] → [0]</td><td>[0].notify[3]</td><td>Loop 全部完成后</td></tr>
+      </tbody>
+    </table>
+
+    <div class="tip-box info">
+      <b>temp1 内部无同步：</b>channelsPerRank_ = 1 时 threadNum_ = 1, slaveThreadNum = 0，
+      NHR 的 PreCopy/RS/AG/PostCopy 全部在 threads_[4] 上串行执行，无需内部 notify 同步。
+    </div>
+  </div>
+
+  <!-- ===== 汇总表 ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#059669;">Σ</div>
+      <div class="step-title">数据量与通信量汇总（rank1 视角）</div>
+    </div>
+
+    <h3 class="sub-title">数据量分配</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>参数</th><th>值</th><th>公式</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>总输入</td><td class="highlight">ds</td><td>单 rank 输入</td></tr>
+        <tr><td>temp0 (Mesh) 数据</td><td class="mesh-col">≈ 0.524 ds</td><td>ds × 11/21</td></tr>
+        <tr><td>temp1 (NHR) 数据</td><td class="nhr-col">≈ 0.476 ds</td><td>ds × 10/21</td></tr>
+        <tr><td>temp0 每片大小</td><td>≈ 0.131 ds</td><td>0.524 ds / 4</td></tr>
+        <tr><td>temp1 每片大小</td><td>≈ 0.119 ds</td><td>0.476 ds / 4</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="sub-title">各模板传输量对比</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>阶段</th><th>temp0 (Mesh)</th><th>temp1 (NHR)</th><th>合计</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>PreCopy</td><td class="mesh-col">—</td><td class="nhr-col">0.476 ds</td><td>0.476 ds</td></tr>
+        <tr><td>RS 发送</td><td class="mesh-col">0.393 ds</td><td class="nhr-col">0.357 ds</td><td>0.750 ds</td></tr>
+        <tr><td>RS 接收</td><td class="mesh-col">0.393 ds</td><td class="nhr-col">0.357 ds（带reduce）</td><td>0.750 ds</td></tr>
+        <tr><td>LocalReduce</td><td class="mesh-col">0.393 ds（3次）</td><td class="nhr-col">—（边收边reduce）</td><td>0.393 ds</td></tr>
+        <tr><td>AG 发送</td><td class="mesh-col">0.393 ds</td><td class="nhr-col">0.357 ds</td><td>0.750 ds</td></tr>
+        <tr><td>AG 接收</td><td class="mesh-col">0.393 ds</td><td class="nhr-col">0.357 ds</td><td>0.750 ds</td></tr>
+        <tr><td>LocalCopy</td><td class="mesh-col">0.262 ds（2次）</td><td class="nhr-col">—</td><td>0.262 ds</td></tr>
+        <tr><td>PostCopy</td><td class="mesh-col">—</td><td class="nhr-col">0.476 ds</td><td>0.476 ds</td></tr>
+        <tr class="total-row"><td><b>总发送</b></td><td class="mesh-col"><b>0.786 ds</b></td><td class="nhr-col"><b>0.714 ds</b></td><td><b>1.500 ds</b></td></tr>
+        <tr class="total-row"><td><b>总接收</b></td><td class="mesh-col"><b>0.786 ds</b></td><td class="nhr-col"><b>0.714 ds</b></td><td><b>1.500 ds</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="tip-box">
+      <b>守恒验证：</b>AllReduce 4P，每 rank RS 发送 = (N-1)/N × ds = 3/4 ds，AG 发送 = 3/4 ds，总发送 = 1.5 ds ✓
+      （temp0 发送 0.786 ds + temp1 发送 0.714 ds = 1.5 ds，精确守恒）
+    </div>
+
+    <h3 class="sub-title">CCL Buffer 使用汇总</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>参数</th><th>值</th><th>公式</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>cclMem0 (Mesh)</td><td class="mesh-col">68.75% of cclMemSize</td><td>22 / (22+10)</td></tr>
+        <tr><td>cclMem1 (NHR)</td><td class="nhr-col">31.25% of cclMemSize</td><td>10 / (22+10)</td></tr>
+        <tr><td>temp0 ScratchMultiple</td><td>2</td><td>RoundUp 切分需双倍</td></tr>
+        <tr><td>temp1 ScratchMultiple</td><td>1</td><td>向下取整，单倍即可</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="sub-title">NHR 步骤详解（rank1, 4 ranks）</h3>
+    <p style="font-size:13px; color:#4b5563; margin-bottom:10px;"><b>ReduceScatter（递归减半）：</b></p>
+    <table class="summary-table">
+      <thead>
+        <tr><th>Step</th><th>deltaRank</th><th>发给</th><th>收自</th><th>发送 slice</th><th>接收 slice</th><th>发送量</th><th>接收量</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td>1</td><td>rank0</td><td>rank2</td><td>[0, 2]</td><td>[1, 3]（带reduce）</td><td>0.238 ds</td><td>0.238 ds</td></tr>
+        <tr><td>1</td><td>2</td><td>rank3</td><td>rank3</td><td>[3]</td><td>[1]（带reduce）</td><td>0.119 ds</td><td>0.119 ds</td></tr>
+      </tbody>
+    </table>
+    <p style="font-size:13px; color:#4b5563; margin: 14px 0 10px;"><b>AllGather（递归倍增）：</b></p>
+    <table class="summary-table">
+      <thead>
+        <tr><th>Step</th><th>deltaRank</th><th>发给</th><th>收自</th><th>发送 slice</th><th>接收 slice</th><th>发送量</th><th>接收量</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>0</td><td>2</td><td>rank3</td><td>rank3</td><td>[1]</td><td>[3]</td><td>0.119 ds</td><td>0.119 ds</td></tr>
+        <tr><td>1</td><td>1</td><td>rank2</td><td>rank0</td><td>[1, 3]</td><td>[0, 2]</td><td>0.238 ds</td><td>0.238 ds</td></tr>
+      </tbody>
+    </table>
+
+    <h3 class="sub-title">关键常量</h3>
+    <table class="summary-table">
+      <thead>
+        <tr><th>常量</th><th>值</th><th>说明</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>MESH_BW_AICPU</code></td><td>11</td><td>AICPU mesh 等价带宽</td></tr>
+        <tr><td><code>CLOS_BW_AICPU</code></td><td>10</td><td>AICPU clos 等价带宽</td></tr>
+        <tr><td><code>HCCL_MIN_SLICE_ALIGN</code></td><td>512</td><td>切片对齐粒度（字节）</td></tr>
+        <tr><td><code>UB_MAX_DATA_SIZE</code></td><td>256MB</td><td>单次传输上限</td></tr>
+      </tbody>
+    </table>
+
+    <div class="legend">
+      <div class="legend-item"><div class="legend-swatch c0"></div>slice0（蓝）</div>
+      <div class="legend-item"><div class="legend-swatch c1"></div>slice1（橙，rank1 负责）</div>
+      <div class="legend-item"><div class="legend-swatch c2"></div>slice2（绿）</div>
+      <div class="legend-item"><div class="legend-swatch c3"></div>slice3（紫）</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#1e40af;"></div>SUM：全规约结果（深色）</div>
+      <div class="legend-item"><div class="legend-swatch empty" style="border:1px dashed #d1d5db;"></div>空槽 / 未使用</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#dbeafe;"></div>temp0 (Mesh) 蓝色系</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#67e8f9;"></div>NHR s0（青）</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#f9a8d4;"></div>NHR s1（粉，rank1负责）</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#bef264;"></div>NHR s2（黄绿）</div>
+      <div class="legend-item"><div class="legend-swatch" style="background:#c4b5fd;"></div>NHR s3（紫）</div>
+    </div>
+  </div>
+
+  <!-- ===== 带宽比例 11:10 原因 ===== -->
+  <div class="step">
+    <div class="step-header">
+      <div class="step-num" style="background:#f59e0b;">📊</div>
+      <div class="step-title">带宽比例 11:10 的原因</div>
+    </div>
+    <div class="step-desc">
+      <code>11:10 = (物理带宽 × 算法效率)_mesh : (物理带宽 × 算法效率)_clos</code>，
+      是物理带宽差异与算法效率差异的综合结果。
+    </div>
+
+    <table class="summary-table">
+      <thead>
+        <tr><th>维度</th><th>Mesh (temp0)</th><th>CLOS/NHR (temp1)</th><th>谁占优</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>物理带宽</td><td class="mesh-col">Mesh 直连 UBC，带宽高</td><td class="nhr-col">CLOS 交换 UBC，经交换芯片</td><td class="mesh-col">Mesh 略高</td></tr>
+        <tr><td>算法并行度</td><td class="mesh-col">3 路从线程并行 SendRecv</td><td class="nhr-col">1 路串行（channelsPerRank=1）</td><td class="mesh-col">Mesh 略高</td></tr>
+        <tr><td>Reduce 方式</td><td class="mesh-col">需额外 3 次 LocalReduce</td><td class="nhr-col">边收边算（SendRecvBatchWriteReduce）</td><td class="nhr-col">NHR 找回一点</td></tr>
+        <tr><td>拷贝开销</td><td class="mesh-col">无 PreCopy/PostCopy（仅 2 次 LocalCopy）</td><td class="nhr-col">有 PreCopy + PostCopy（各 0.476 ds）</td><td class="nhr-col">NHR 找回一点</td></tr>
+        <tr><td><b>综合净效率</b></td><td class="mesh-col"><b>≈ 11</b></td><td class="nhr-col"><b>≈ 10</b></td><td>接近 1:1</td></tr>
+      </tbody>
+    </table>
+
+    <div class="tip-box info">
+      <b>优化目标：</b>data_mesh / BW_mesh = data_clos / BW_clos → 两路同时完成。<br>
+      按 11:10 分配数据量（0.524 ds : 0.476 ds），使得 temp0 和 temp1 的执行时间大致相等，
+      并发执行时不会出现一路等待另一路的情况，最大化整体吞吐。<br><br>
+      <b>CCU_MS 模式差异：</b>Mesh 硬件双流 → 11×2=22, CLOS 不变=10 → 比例变为 22:10，
+      此时 Mesh 分配更多数据（约 0.688 ds），NHR 分配更少（约 0.312 ds）。
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

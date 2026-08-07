@@ -1,0 +1,761 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>HCCL AllReduce Mesh1D TwoShot MeshChunk 数据传输示意图（4 Rank）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Consolas", monospace, sans-serif;
+    background: #fafbfc;
+    color: #222;
+    margin: 0;
+    padding: 24px 16px 60px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    margin: 8px 0 4px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    margin: 0 auto 34px;
+    max-width: 1660px;
+    padding: 18px 22px 26px;
+  }
+  .card h2 {
+    font-size: 18px;
+    margin: 4px 0 2px;
+    border-left: 5px solid #4A90D9;
+    padding-left: 10px;
+  }
+  .card .desc {
+    color: #555;
+    font-size: 12.5px;
+    line-height: 1.85;
+    margin: 8px 0 6px;
+    padding-left: 15px;
+  }
+  .card .subhead {
+    font-size: 14px;
+    font-weight: 700;
+    color: #2b3a48;
+    margin: 20px 0 4px;
+    padding-left: 15px;
+    border-left: 3px solid #E0533D;
+  }
+  .card.aicpu h2 { border-left-color: #9B59B6; }
+  svg { display: block; margin: 0 auto; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 26px;
+    justify-content: center;
+    margin-top: 14px;
+    font-size: 12px;
+    color: #444;
+  }
+  .legend .item { display: flex; align-items: center; gap: 7px; }
+  .legend .sw {
+    width: 20px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.2);
+  }
+  .legend .line { width: 26px; height: 0; border-top-width: 3px; border-top-style: solid; }
+  .note {
+    font-size: 11.5px; color: #888; text-align: center; margin-top: 10px; line-height:1.8;
+  }
+  code { background:#f2f4f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<body>
+
+<h1>HCCL AllReduce Mesh1D TwoShot MeshChunk 数据传输示意图（4 Rank）</h1>
+<div class="subtitle">模板：<code>InsTempAllReduceMesh1DTwoShotMeshChunk</code><br>每 rank 输入数据量记为 dataSize，count 可被 4 整除。不同数据块 / chunk 以不同颜色标识。</div>
+
+<!-- ============ 模板一：MeshChunk ============ -->
+<div class="card">
+  <h2>Mesh1D TwoShot MeshChunk &nbsp;——&nbsp; ReduceScatter(mesh, 分布式Reduce) + AllGather(mesh)</h2>
+  <div class="desc">
+    <b>数据切分（两级）：</b>一级把每 rank 数据切成 4 个 <b>chunk</b>（各 dataSize/4），chunk k 记为 D_r[k]；
+    二级把每个 chunk 再切成 rankSize−1=3 个 <b>sub-slice</b>（各 dataSize/12），用于 ReduceScatter 的 3 步流水。cclBuffer 倍数 = 2。<br>
+    <b>颜色规则：</b>按 chunk 编号 —— chunk0=蓝，chunk1=橙，chunk2=绿，chunk3=紫；带 “Σ” 且深色描边的块表示该 chunk 已完成 4-rank 归约。
+  </div>
+
+  <div class="subhead">阶段总览（in / cclBuffer / out 数据流）</div>
+  <svg id="mesh_pipeline" width="1620" height="560" viewBox="0 0 1620 560"></svg>
+
+  <div class="subhead">ReduceScatter 细化：3 步全-mesh 流水（rank0 视角）</div>
+  <div class="desc" style="border:none;padding-left:15px;margin-top:2px;">
+    <b>目标：</b>每个 rank r 是 chunk r 的“归主”，需把所有 rank 的 chunk-r 分量累加进自己的 <code>cclBuffer[chunk r]</code>（PreCopy 已放入自己那份）。<br>
+    <b>写-归约语义（two-shot 关键）：</b>发送源恒为本地用户 <code>in</code>；数据被写入 <b>对端(owner)</b> 的 <code>cclBuffer</code> 对应 chunk，并在写入的同时执行 reduce 累加（不经本地 cclBuffer 中转）。<br>
+    <b>流水调度：</b>共 3 步（step0/1/2）。每一步里，本 rank 与其余 3 个 rank <b>同时</b>各交换 1 个 sub-slice（dataSize/12）——既发出 3 个 sub-slice、又收进 3 个 sub-slice，充分利用全 mesh 带宽。3 步累计：发 3×(dataSize/12)=<b>3/4·dataSize</b>，收 <b>3/4·dataSize</b>。
+  </div>
+  <svg id="mesh_rs_detail" width="1620" height="370" viewBox="0 0 1620 370"></svg>
+
+  <div class="subhead">各 rank 间通信拓扑（ReduceScatter mesh &amp; AllGather mesh）</div>
+  <svg id="mesh_topo" width="1620" height="340" viewBox="0 0 1620 340"></svg>
+  <div class="legend" id="mesh_legend"></div>
+</div>
+
+
+<div class="note">说明：本图为静态数据流示意，箭头旁标注为对应阶段/步的传输数据量（每 rank 视角）。<br>MeshChunk 的 ReduceScatter 直接以用户 <b>in</b> 为源、以 write-reduce 写对端 <b>cclBuffer</b>；AllGather 以 Read 模式将结果写入 <b>out</b>。</div>
+
+<script>
+
+const SVGNS = "http://www.w3.org/2000/svg";
+
+// ---------- 颜色 ----------
+const CHUNK = ["#4A90D9", "#E8943A", "#5FA855", "#9B59B6"];      // 浅色（原始数据块）
+const CHUNK_DK = ["#1F5FA8", "#B26608", "#2F7A2A", "#6E3B8A"];   // 深色（归约结果）
+const EMPTY = "#EAECEF";
+const RS_COLOR = "#E0533D";   // ReduceScatter / 归约通信
+const AG_COLOR = "#3A7BD5";   // AllGather / 拷贝通信
+const COPY_COLOR = "#7A8A99"; // 本地拷贝
+
+function el(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function add(svg, tag, attrs) { const e = el(tag, attrs); svg.appendChild(e); return e; }
+function txt(svg, x, y, s, opt={}) {
+  const t = add(svg, "text", {
+    x, y,
+    "text-anchor": opt.anchor || "middle",
+    "font-size": opt.size || 12,
+    "font-family": opt.mono ? "Consolas, monospace" : "'PingFang SC','Microsoft YaHei',sans-serif",
+    "font-weight": opt.bold ? "700" : "400",
+    fill: opt.fill || "#333"
+  });
+  t.textContent = s;
+  return t;
+}
+
+// 定义箭头 marker
+function defsArrows(svg) {
+  const defs = add(svg, "defs", {});
+  [["arrRS", RS_COLOR], ["arrAG", AG_COLOR], ["arrCopy", COPY_COLOR], ["arrPhase", "#5b6b7a"]].forEach(([id, c]) => {
+    const m = el("marker", {id, viewBox:"0 0 10 10", refX:"8.5", refY:"5",
+      markerWidth:"7", markerHeight:"7", orient:"auto-start-reverse"});
+    const p = el("path", {d:"M0,0 L10,5 L0,10 z", fill:c});
+    m.appendChild(p); defs.appendChild(m);
+  });
+  return defs;
+}
+
+// 画一个数据块（chunk / segment）
+function block(svg, x, y, w, h, color, label, opt={}) {
+  add(svg, "rect", {x, y, width:w, height:h, rx:4, ry:4,
+    fill: color,
+    stroke: opt.stroke || "rgba(0,0,0,0.25)",
+    "stroke-width": opt.sw || 1});
+  if (label) txt(svg, x + w/2, y + h/2 + 4, label,
+    {size: opt.lsize || 12, bold: opt.bold, mono:true, fill: opt.textFill || "#fff"});
+  if (opt.sub) txt(svg, x + w/2, y - 4, opt.sub, {size:9.5, fill:"#888"});
+}
+
+// 阶段间大箭头 + 多行说明（说明置于箭头下方，行距 15，杜绝遮挡）
+function phaseArrow(svg, x1, x2, y, lines) {
+  add(svg, "line", {x1, y1:y, x2:x2-4, y2:y, stroke:"#5b6b7a", "stroke-width":2, "marker-end":"url(#arrPhase)"});
+  const c = (x1+x2)/2;
+  lines.forEach((ln, i) => {
+    txt(svg, c, y + 20 + i*16, ln.t, {size: ln.b?11.5:10.5, bold:ln.b, fill: ln.f || "#4a5a68"});
+  });
+}
+
+/* ===================================================================
+   模板一 MeshChunk —— Pipeline（阶段总览）
+   =================================================================== */
+function drawMeshPipeline() {
+  const svg = document.getElementById("mesh_pipeline");
+  defsArrows(svg);
+
+  const stageX = [150, 500, 880, 1280];
+  const stageTitle = [
+    ["① 初始 in", "每 rank 4 个 chunk（各 dataSize/4）"],
+    ["② PreCopy → cclBuffer", "仅本 rank 的 chunk r 入位（dataSize/4）"],
+    ["③ ReduceScatter 后 (cclBuffer)", "chunk r = 4-rank 归约 Σr"],
+    ["④ AllGather → out", "全部 4 个 chunk = Σ"]
+  ];
+  const bw = 40, bh = 34, gap = 3;
+  const rowY = r => 100 + r*62;
+  const gridW = bw*4+gap*3;
+
+  stageTitle.forEach((t, i) => {
+    txt(svg, stageX[i] + gridW/2, 42, t[0], {bold:true, size:13, fill:"#2b3a48"});
+    txt(svg, stageX[i] + gridW/2, 60, t[1], {size:10, fill:"#8a97a3"});
+  });
+  for (let r=0;r<4;r++) txt(svg, 80, rowY(r)+bh/2+4, "rank"+r, {bold:true, size:12, fill:"#333"});
+
+  // ① 初始 in
+  for (let r=0;r<4;r++)
+    for (let k=0;k<4;k++)
+      block(svg, stageX[0]+k*(bw+gap), rowY(r), bw, bh, CHUNK[k], r+"\u2223"+k,
+        {lsize:11, sub: k===0?"chunk:0 1 2 3":""});
+  txt(svg, stageX[0]+gridW/2, rowY(3)+bh+24, "标签 r\u2223k = rank r 数据的 chunk k（D_r[k]）", {size:10, fill:"#8a97a3"});
+
+  // ② PreCopy
+  for (let r=0;r<4;r++)
+    for (let k=0;k<4;k++){
+      if (k===r) block(svg, stageX[1]+k*(bw+gap), rowY(r), bw, bh, CHUNK[k], r+"\u2223"+k, {lsize:11});
+      else       block(svg, stageX[1]+k*(bw+gap), rowY(r), bw, bh, EMPTY, "", {stroke:"#cfd4d9"});
+    }
+
+  // ③ ReduceScatter 后
+  for (let r=0;r<4;r++)
+    for (let k=0;k<4;k++){
+      if (k===r) block(svg, stageX[2]+k*(bw+gap), rowY(r), bw, bh, CHUNK_DK[k], "\u03A3"+k,
+        {lsize:12, bold:true, stroke:"#111", sw:2});
+      else       block(svg, stageX[2]+k*(bw+gap), rowY(r), bw, bh, EMPTY, "", {stroke:"#cfd4d9"});
+    }
+
+  // ④ AllGather out
+  for (let r=0;r<4;r++)
+    for (let k=0;k<4;k++)
+      block(svg, stageX[3]+k*(bw+gap), rowY(r), bw, bh, CHUNK_DK[k], "\u03A3"+k, {lsize:12, bold:true});
+
+  // 阶段间箭头（放在栅格下方的说明带，行距 16，不遮挡）
+  const bandY = 410;
+  phaseArrow(svg, stageX[0]+gridW+6, stageX[1]-6, bandY, [
+    {t:"PreCopy (LocalCopy)", b:true},
+    {t:"in → cclBuffer", f:COPY_COLOR},
+    {t:"dataSize/4", f:COPY_COLOR}
+  ]);
+  phaseArrow(svg, stageX[1]+gridW+6, stageX[2]-6, bandY, [
+    {t:"ReduceScatter (mesh, 3 步)", b:true, f:RS_COLOR},
+    {t:"源=in → 对端 cclBuffer 写归约", f:RS_COLOR},
+    {t:"发/收 各 3/4·dataSize", f:RS_COLOR}
+  ]);
+  phaseArrow(svg, stageX[2]+gridW+6, stageX[3]-6, bandY, [
+    {t:"AllGather (mesh, Read)", b:true, f:AG_COLOR},
+    {t:"本地 cclBuf→out : dataSize/4", f:COPY_COLOR},
+    {t:"远端 cclBuf→out 收 3/4·dataSize", f:AG_COLOR},
+    {t:"被读走 发 3/4·dataSize", f:AG_COLOR}
+  ]);
+}
+
+/* ===================================================================
+   模板一 MeshChunk —— ReduceScatter 分步明细矩阵（rank0 视角）
+   =================================================================== */
+function drawMatrix(svg, x0, y0, title, subtitle, colHeaders, rowHeaders, cellText, cellFill) {
+  const labW = 74, colW = 116, headH = 46, rowH = 40;
+  const nCol = colHeaders.length;
+  const totalW = labW + nCol*colW;
+
+  txt(svg, x0 + totalW/2, y0 - 26, title, {bold:true, size:13, fill:"#2b3a48"});
+  txt(svg, x0 + totalW/2, y0 - 9, subtitle, {size:10.5, fill:"#8a97a3"});
+
+  // 表头背景
+  add(svg, "rect", {x:x0, y:y0, width:totalW, height:headH, fill:"#f0f3f7", stroke:"#d5dbe1"});
+  add(svg, "rect", {x:x0, y:y0, width:labW, height:headH, fill:"#e7ebf0", stroke:"#d5dbe1"});
+  colHeaders.forEach((h, c) => {
+    const cx = x0 + labW + c*colW + colW/2;
+    h.split("\n").forEach((ln, li) =>
+      txt(svg, cx, y0 + 20 + li*15, ln, {size:11, bold:li===0, fill:"#3a4a58"}));
+  });
+
+  // 行
+  rowHeaders.forEach((rh, r) => {
+    const ry = y0 + headH + r*rowH;
+    add(svg, "rect", {x:x0, y:ry, width:labW, height:rowH, fill:"#e7ebf0", stroke:"#d5dbe1"});
+    txt(svg, x0 + labW/2, ry + rowH/2 + 4, rh, {size:11.5, bold:true, fill:"#3a4a58"});
+    for (let c=0;c<nCol;c++){
+      const cx = x0 + labW + c*colW;
+      add(svg, "rect", {x:cx, y:ry, width:colW, height:rowH, fill:"#fff", stroke:"#d5dbe1"});
+      const fill = cellFill(r, c);
+      // 内部彩色小块
+      add(svg, "rect", {x:cx+colW/2-40, y:ry+rowH/2-13, width:80, height:26, rx:4,
+        fill:fill, stroke:"rgba(0,0,0,0.25)"});
+      txt(svg, cx+colW/2, ry+rowH/2+4, cellText(r,c), {size:11.5, bold:true, mono:true, fill:"#fff"});
+    }
+  });
+}
+
+function drawMeshRsDetail() {
+  const svg = document.getElementById("mesh_rs_detail");
+  defsArrows(svg);
+
+  // 发送调度：rank0 的 in → 各 owner 的 cclBuffer（write-reduce）
+  // 列: →rank1(chunk1) / →rank2(chunk2) / →rank3(chunk3)
+  const sendText = [
+    ["c1\u00B7s2","c2\u00B7s1","c3\u00B7s0"], // step0
+    ["c1\u00B7s1","c2\u00B7s0","c3\u00B7s2"], // step1
+    ["c1\u00B7s0","c2\u00B7s2","c3\u00B7s1"]  // step2
+  ];
+  drawMatrix(svg, 130, 66,
+    "发送调度：rank0 的 in  →  对端 owner 的 cclBuffer（写-归约）",
+    "单元 = 发出的 sub-slice（各 dataSize/12），颜色=目标 chunk",
+    ["→ rank1\n(累加 chunk1)", "→ rank2\n(累加 chunk2)", "→ rank3\n(累加 chunk3)"],
+    ["step0","step1","step2"],
+    (r,c)=>sendText[r][c],
+    (r,c)=>CHUNK[c+1]
+  );
+
+  // 接收调度：写入 rank0 自己的 cclBuffer[chunk0]，最终 = Σ0
+  const recvText = [
+    ["c0\u00B7s0","c0\u00B7s1","c0\u00B7s2"], // step0
+    ["c0\u00B7s2","c0\u00B7s0","c0\u00B7s1"], // step1
+    ["c0\u00B7s1","c0\u00B7s2","c0\u00B7s0"]  // step2
+  ];
+  drawMatrix(svg, 900, 66,
+    "接收调度：对端 in  →  rank0 的 cclBuffer[chunk0]（写-归约累加）",
+    "单元 = 被写入 chunk0 的 sub-slice（各 dataSize/12），颜色=chunk0",
+    ["来自 rank1", "来自 rank2", "来自 rank3"],
+    ["step0","step1","step2"],
+    (r,c)=>recvText[r][c],
+    (r,c)=>CHUNK[0]
+  );
+
+  // 结论行
+  txt(svg, 90, 316, "\u2192 3 步后：rank0.cclBuffer[chunk0] = D0[c0](PreCopy) + D1[c0] + D2[c0] + D3[c0] = \u03A30",
+    {size:11.5, bold:true, fill:RS_COLOR, anchor:"start", mono:true});
+  txt(svg, 130, 350, "每步与 3 个对端并行各交换 1 个 sub-slice（dataSize/12）；每对端累计收/发 dataSize/4，rank0 全程 发/收 各 3/4·dataSize。",
+    {size:10.5, fill:"#8a97a3", anchor:"start"});
+}
+
+/* ===================================================================
+   模板一 MeshChunk —— 拓扑（RS mesh + AG mesh）
+   =================================================================== */
+function ringNodes(cx, cy, R) {
+  return [
+    {x:cx-R, y:cy-R}, {x:cx+R, y:cy-R}, {x:cx+R, y:cy+R}, {x:cx-R, y:cy+R}
+  ];
+}
+function drawNode(svg, p, label, color) {
+  add(svg, "circle", {cx:p.x, cy:p.y, r:26, fill:"#fff", stroke:color||"#4A90D9", "stroke-width":2.5});
+  txt(svg, p.x, p.y+5, label, {bold:true, size:14, fill:"#333"});
+}
+function edge(svg, a, b, color, marker, label, offset=0, labelSide=1) {
+  const dx=b.x-a.x, dy=b.y-a.y, len=Math.hypot(dx,dy);
+  const nx=-dy/len, ny=dx/len;
+  const ax=a.x+nx*offset, ay=a.y+ny*offset, bx=b.x+nx*offset, by=b.y+ny*offset;
+  const ux=(bx-ax)/len, uy=(by-ay)/len, r=28;
+  add(svg, "line", {x1:ax+ux*r, y1:ay+uy*r, x2:bx-ux*r, y2:by-uy*r,
+    stroke:color, "stroke-width":2.2, "marker-end":"url(#"+marker+")"});
+  if (label) {
+    const mx=(ax+bx)/2 + nx*12*labelSide, my=(ay+by)/2 + ny*12*labelSide;
+    txt(svg, mx, my+3, label, {size:10.5, fill:color, bold:true, mono:true});
+  }
+}
+
+function drawMeshTopo() {
+  const svg = document.getElementById("mesh_topo");
+  defsArrows(svg);
+
+  const pairs = [[0,1],[1,2],[2,3],[3,0],[0,2],[1,3]];
+
+  // 左：ReduceScatter mesh
+  const c1x=460, c1y=185, R=100;
+  txt(svg, c1x, 44, "ReduceScatter（全连接 mesh · 3 steps）", {bold:true, size:13, fill:RS_COLOR});
+  txt(svg, c1x, 62, "每对双向各 dataSize/4（分 3 步，每步每对 dataSize/12）", {size:10.5, fill:"#8a97a3"});
+  const N1 = ringNodes(c1x, c1y, R);
+  pairs.forEach(([a,b])=>{
+    edge(svg, N1[a], N1[b], RS_COLOR, "arrRS", "", 6, 1);
+    edge(svg, N1[b], N1[a], RS_COLOR, "arrRS", "", 6, 1);
+  });
+  txt(svg, (N1[0].x+N1[1].x)/2, N1[0].y-12, "dataSize/4", {size:10, fill:RS_COLOR, bold:true, mono:true});
+  for (let r=0;r<4;r++) drawNode(svg, N1[r], "r"+r, RS_COLOR);
+  txt(svg, c1x, c1y-4, "发 D_r[s] 给 owner s", {size:10, fill:"#a86a2a", bold:true});
+  txt(svg, c1x, c1y+14, "收各方 chunk r 并归约", {size:10, fill:"#a86a2a", bold:true});
+
+  // 右：AllGather mesh
+  const c2x=1160, c2y=185;
+  txt(svg, c2x, 44, "AllGather（全连接 mesh · Read）", {bold:true, size:13, fill:AG_COLOR});
+  txt(svg, c2x, 62, "每对双向各 dataSize/4，一次完成", {size:10.5, fill:"#8a97a3"});
+  const N2 = ringNodes(c2x, c2y, R);
+  pairs.forEach(([a,b])=>{
+    edge(svg, N2[a], N2[b], AG_COLOR, "arrAG", "", 6, 1);
+    edge(svg, N2[b], N2[a], AG_COLOR, "arrAG", "", 6, 1);
+  });
+  txt(svg, (N2[0].x+N2[1].x)/2, N2[0].y-12, "dataSize/4", {size:10, fill:AG_COLOR, bold:true, mono:true});
+  for (let r=0;r<4;r++) drawNode(svg, N2[r], "r"+r, AG_COLOR);
+  txt(svg, c2x, c2y-4, "rank r 提供 Σr", {size:10, fill:"#4779b8", bold:true});
+  txt(svg, c2x, c2y+14, "读齐 4 chunk 到 out", {size:10, fill:"#4779b8", bold:true});
+
+  // 中间说明
+  txt(svg, 810, 150, "RS 后每 rank", {size:11, fill:"#888"});
+  txt(svg, 810, 168, "只持有 1 个", {size:11, fill:"#888"});
+  txt(svg, 810, 186, "归约好的 chunk", {size:11, fill:"#888"});
+  txt(svg, 810, 210, "AllGather 再", {size:11, fill:"#888"});
+  txt(svg, 810, 228, "互补齐全部", {size:11, fill:"#888"});
+}
+
+/* ===================================================================
+   模板二 AicpuReduceNHR —— Pipeline
+   =================================================================== */
+function buildLegend(id, items) {
+  const box = document.getElementById(id);
+  items.forEach(it=>{
+    const d = document.createElement("div"); d.className="item";
+    if (it.line) {
+      const l=document.createElement("span"); l.className="line";
+      l.style.borderTopColor=it.color; d.appendChild(l);
+    } else {
+      const s=document.createElement("span"); s.className="sw";
+      s.style.background=it.color; if(it.border) s.style.border="2px solid #111"; d.appendChild(s);
+    }
+    const t=document.createElement("span"); t.textContent=it.text; d.appendChild(t);
+    box.appendChild(d);
+  });
+}
+
+// 执行绘制
+drawMeshPipeline();
+drawMeshRsDetail();
+
+// 执行绘制
+drawMeshTopo();
+drawAicpuPipeline();
+drawAicpuTopo();
+
+buildLegend("mesh_legend", [
+  {color:CHUNK[0], text:"chunk0 数据"},
+  {color:CHUNK[1], text:"chunk1 数据"},
+  {color:CHUNK[2], text:"chunk2 数据"},
+  {color:CHUNK[3], text:"chunk3 数据"},
+  {color:CHUNK_DK[0], border:true, text:"Σk：该 chunk 完成 4-rank 归约"},
+  {color:EMPTY, text:"空 / 未使用位置"},
+  {line:true, color:RS_COLOR, text:"ReduceScatter 通信（写-归约）"},
+  {line:true, color:AG_COLOR, text:"AllGather 通信"},
+  {line:true, color:COPY_COLOR, text:"本地拷贝"}
+]);
+</script>
+
+  
+  <!-- ===== 数据切分与性能对比分析 ===== -->
+  
+  <style>
+    .analysis-card {
+      background: #fff;
+      border: 1px solid #e3e6ea;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+      margin: 0 auto 34px;
+      max-width: 1660px;
+      padding: 18px 22px 26px;
+    }
+    .analysis-card h2 {
+      font-size: 18px;
+      margin: 4px 0 12px;
+      border-left: 5px solid #7c3aed;
+      padding-left: 10px;
+      color: #1a1a2e;
+    }
+    .analysis-card h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #2b3a48;
+      margin: 20px 0 8px;
+      padding-left: 12px;
+      border-left: 3px solid #7c3aed;
+    }
+    .analysis-card .scene-box {
+      background: #f5f3ff;
+      border: 1px solid #ddd6fe;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      line-height: 1.8;
+      color: #4c1d95;
+    }
+    .analysis-card .scene-box b { color: #5b21b6; }
+    .analysis-card table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+      margin: 10px 0 16px;
+    }
+    .analysis-card th, .analysis-card td {
+      border: 1px solid #dde2e8;
+      padding: 8px 10px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .analysis-card th {
+      background: #eef2ff;
+      color: #1e1b4b;
+      font-weight: 600;
+    }
+    .analysis-card td.k {
+      background: #f7f9fb;
+      font-weight: 600;
+      text-align: left;
+      color: #374151;
+    }
+    .analysis-card td.highlight {
+      background: #fef3c7;
+      font-weight: 700;
+      color: #92400e;
+    }
+    .analysis-card .formula {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12.5px;
+      color: #0f172a;
+      margin: 8px 0 12px;
+      line-height: 1.7;
+    }
+    .analysis-card .note-box {
+      background: #fefce8;
+      border: 1px solid #fde68a;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: #854d0e;
+      margin: 10px 0;
+      line-height: 1.7;
+    }
+    .analysis-card .notify-card {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin: 12px 0;
+    }
+    .analysis-card .notify-card h4 {
+      font-size: 14px;
+      color: #166534;
+      margin: 0 0 8px;
+    }
+    .analysis-card .timeline {
+      position: relative;
+      padding-left: 24px;
+      margin: 12px 0;
+    }
+    .analysis-card .timeline::before {
+      content: '';
+      position: absolute;
+      left: 8px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #86efac;
+    }
+    .analysis-card .timeline-item {
+      position: relative;
+      margin-bottom: 14px;
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+    .analysis-card .timeline-item::before {
+      content: '';
+      position: absolute;
+      left: -20px;
+      top: 6px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #22c55e;
+      border: 2px solid #fff;
+    }
+    .analysis-card .timeline-item .step-tag {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .tag-main2sub { background: #dbeafe; color: #1e40af; }
+    .tag-sub2main { background: #fce7f3; color: #9d174d; }
+    .tag-exec { background: #f3f4f6; color: #374151; }
+  </style>
+
+  <div class="analysis-card">
+    <h2>数据切分与性能对比分析</h2>
+    
+    <div class="scene-box">
+      <b>假设场景</b>：rankSize = <b>5</b>（非 2^i），dataType = <b>u64</b>（8 字节），dataSize = <b>34.125 MB</b>（dataCount = 4,472,832），hcclBuff.size = <b>4 MB</b>，HCCL_MIN_SLICE_ALIGN = 128 字节。<br>
+      <b>关键公式</b>：<code>maxDataSizePerLoop = min(hcclBuff.size, hcclBuff.size / mult / 128 × 128)</code>，<code>loopTimes = ⌈dataCount / maxDataCountPerLoop⌉</code>。
+    </div>
+
+
+    <h3>1. 循环次数与末轮数据</h3>
+    <div class="formula">
+      mult = <b>2</b> &nbsp;|&nbsp;
+      scratchBoundDataSize = 4194304 / 2 / 128 × 128 = <b>2,097,152</b> 字节 &nbsp;|&nbsp;
+      maxDataCountPerLoop = <b>262,144</b><br>
+      loopTimes = ⌈4472832 / 262,144⌉ = <b>18</b> &nbsp;|&nbsp;
+      末轮 currDataCount = 4472832 - 17 × 262,144 = <b>16,384</b> &nbsp;|&nbsp;
+      currDataSize = <b>131,072</b> 字节
+    </div>
+
+    <h3>2. 末轮数据切分（按数据维 2 级切分）</h3>
+    <div style="font-size:13px;color:#374151;margin-bottom:10px;line-height:1.7;">二级切片：一级切分为 5 个 chunk（同 TwoShot），每个 chunk 再切为 N-1=4 个 subSlice。count=3277 时 3277%4=1≠0，出现大块/小块混合！</div>
+    
+      <h3>一级切分（CalcSliceInfoVec）</h3>
+      <div class="formula">chunkCount = ⌈16384 / 5⌉ = 3,277 &nbsp;&nbsp; chunkSize = 3277 × 8 = 26,216 字节</div>
+      <table>
+        <thead><tr><th>chunk</th><th>offset (字节)</th><th>count</th><th>size (字节)</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>chunk 0-3</td><td>0 / 26216 / 52432 / 78648</td><td>3,277 (各)</td><td>26,216 (各)</td><td>前 4 块等大</td></tr>
+          <tr class="highlight"><td>chunk 4</td><td>104,864</td><td><b>3,276</b></td><td><b>26,208</b></td><td>末块余量</td></tr>
+        </tbody>
+      </table>
+      <h3>二级切分（RunReduceScatter，每 chunk 切 4 subSlice）</h3>
+      <div class="formula">bigDataSliceNum = count % 4 &nbsp;&nbsp; bigSize = (count/4+1)×8 &nbsp;&nbsp; smallSize = (count/4)×8</div>
+      <table>
+        <thead><tr><th>一级 chunk</th><th>count</th><th>count%4</th><th>大块数</th><th>大块 size</th><th>小块数</th><th>小块 size</th><th>子块合计</th></tr></thead>
+        <tbody>
+          <tr><td>chunk 0-3</td><td>3,277</td><td class="highlight"><b>1</b></td><td><b>1</b></td><td><b>6,560</b> (820元素)</td><td><b>3</b></td><td><b>6,552</b> (819元素)</td><td>1×6560+3×6552=26216 ✓</td></tr>
+          <tr><td>chunk 4</td><td>3,276</td><td>0</td><td>0</td><td>—</td><td>4</td><td>6,552</td><td>4×6552=26208 ✓</td></tr>
+        </tbody>
+      </table>
+    <div class="note-box"><b>分析：</b>本章 count=3277 % 4 = 1（1 大块 + 3 小块），子块大小不均。ReduceScatter 循环 N-1=4 步，每步与 N-1=4 个对端各交换 1 个子块。multiple=2 原因同 TwoShot：非均衡切分时标称槽位膨胀。</div>
+
+    
+      <h3>3. 性能对比（rank=4 与 rank=2^i 合并）</h3>
+      <table>
+        <thead><tr><th style="width:22%">维度</th><th>rank = 4</th><th>rank = 2^i（N ≥ 2）</th></tr></thead>
+        <tbody><tr><td class="k">算法结构</td><td>流水RS + AG</td><td>流水RS + AG</td></tr><tr><td class="k">数据切分</td><td>2级（chunk+sub）</td><td>2级</td></tr><tr><td class="k">线程数</td><td>4</td><td>N</td></tr><tr><td class="k">同步次数</td><td>8</td><td>2N</td></tr><tr><td class="k">cclBuff 倍率</td><td class="highlight">2×</td><td class="highlight">2×</td></tr><tr><td class="k">单 rank 发送量</td><td>1.5 × ds</td><td>2(N-1)/N·ds</td></tr><tr><td class="k">单 rank 接收量</td><td>1.5 × ds</td><td>2(N-1)/N·ds</td></tr><tr><td class="k">单 rank 通信总量</td><td class="highlight">3 × ds</td><td class="highlight">4(N-1)/N·ds</td></tr><tr><td class="k">LocalCopy 数据量</td><td>0.5 × ds</td><td>2/N·ds</td></tr><tr><td class="k">Reduce 方式</td><td>通信内联归约</td><td>通信内联归约</td></tr><tr><td class="k">Reduce 数据量</td><td>重叠(0.75ds)</td><td>重叠((N-1)/N·ds)</td></tr><tr><td class="k">通信步数</td><td>3+1 (流水)</td><td>(N-1)+1 (流水)</td></tr><tr><td class="k">通信并行度</td><td>N-1=3路</td><td>N-1路</td></tr></tbody>
+      </table>
+
+    <h3>4. 关键结论</h3>
+    <div style="font-size:13px;color:#374151;line-height:1.9;padding-left:8px;">
+      <div>• <b>cclBuff 倍率 = 2×</b>：兼容非均衡切分溢出（标称槽位 N×ceil > dataSize）</div>
+      <div>• <b>loop 次数 = 18</b>：倍率越大，单轮处理数据越小，循环次数越多</div>
+      <div>• <b>五模板横向对比</b>：详见独立文档 <code>A00-模板综合对比.html</code></div>
+      <div>• <b>适用场景</b>：流水线 RS 可掩盖延迟，但同步次数最多（2N）；内联归约不支持特殊数据类型。适合单级Mesh(UBX)、大数据、流水线掩盖延迟场景。</div>
+    </div>
+  </div>
+
+  <div class="analysis-card">
+    <h2>主从线程同步与 Notify 机制（4 rank 场景）</h2>
+    <div class="scene-box">
+      <b>源码位置</b>：<code>ins_temp_all_reduce_mesh_1D_two_shot_mesh_chunk.cc</code><br>
+      <b>线程模型</b>：1 主线程 + 3 从线程（threadNum = templateRankSize_ = 4）<br>
+      <b>Notify 资源</b>：每从线程 3 个 Notify（索引 0/1/2），主线程 9 个 Notify（索引 0-8）
+    </div>
+
+    <h3>1. 资源配置（CalcRes，line 31-51）</h3>
+    <div class="formula">
+      threadNum = templateRankSize_ = 4<br>
+      slaveThreadNum = threadNum - 1 = 3<br>
+      NOTIFY_NUM_PER_SLAVE_THREAD = 3<br>
+      notifyNumPerThread = [3, 3, 3] &nbsp;// 每从线程 3 个<br>
+      notifyNumOnMainThread = (threadNum - 1) × 3 = 9
+    </div>
+
+    <h3>2. Notify 索引分配（3 组）</h3>
+    <table>
+      <thead><tr><th>Notify 组</th><th>用途</th><th>从线程索引</th><th>主线程索引（slave 0/1/2）</th><th>源码函数</th></tr></thead>
+      <tbody>
+        <tr><td>第 0 组</td><td>RS 启动 / RS 结束</td><td>0</td><td>[0, 1, 2]</td><td>GetNotifyIdxMainToSub / GetNotifyIdxSubToMain</td></tr>
+        <tr><td>第 1 组</td><td>RS 步间同步</td><td>1</td><td>[3, 4, 5]</td><td>NotifyIdxMainToSubInRSMeshChunk / NotifyIdxSubToMainInRSMeshChunk</td></tr>
+        <tr><td>第 2 组</td><td>AG 启动 / AG 结束</td><td>2</td><td>AG启动:写从线程[2] / AG结束:[8, 7, 6]</td><td>NotifyIdxMainToSubInAG / NotifyIdxSubToMainInAG</td></tr>
+      </tbody>
+    </table>
+    <div class="note-box">
+      <b>索引设计要点</b>：AG 结束的主线程索引采用倒序分配 <code>8 - slaveIdx</code>（slave0→8, slave1→7, slave2→6），与 RS 结束的正序 <code>slaveIdx</code>（0,1,2）区分，避免 Notify 复用冲突。
+    </div>
+
+    <h3>3. 完整调用时序（8 次同步）</h3>
+    <div class="notify-card">
+      <h4>ReduceScatter 阶段（6 次同步）</h4>
+      <div class="timeline">
+        <div class="timeline-item">
+          <span class="step-tag tag-main2sub">Main→Sub</span>
+          <b>RS 启动</b>：GetNotifyIdxMainToSub（从线程索引 0）+ PreSyncInterThreads
+          <br>主线程写各从线程的 notify[0]，唤醒从线程开始 RS
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-exec">执行</span>
+          <b>step 0</b>：ReduceScatterMeshChunk(stepIndex=0)，与 3 个对端各交换 1 子块
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-sub2main">Sub→Main</span>
+          <b>步间同步</b>：NotifyIdxSubToMainInRSMeshChunk（主线程索引 [3,4,5]）+ PostSyncInterThreads
+          <br>从线程写主线程 notify[3,4,5]，回报 step0 完成
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-main2sub">Main→Sub</span>
+          <b>步间同步</b>：NotifyIdxMainToSubInRSMeshChunk（从线程索引 1）+ PreSyncInterThreads
+          <br>主线程写各从线程的 notify[1]，唤醒 step1
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-exec">执行</span>
+          <b>step 1</b>：ReduceScatterMeshChunk(stepIndex=1)
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-sub2main">Sub→Main</span>
+          <b>步间同步</b>：NotifyIdxSubToMainInRSMeshChunk（主线程索引 [3,4,5]）+ PostSyncInterThreads
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-main2sub">Main→Sub</span>
+          <b>步间同步</b>：NotifyIdxMainToSubInRSMeshChunk（从线程索引 1）+ PreSyncInterThreads
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-exec">执行</span>
+          <b>step 2</b>：ReduceScatterMeshChunk(stepIndex=2)，最后一步，无需步间同步
+          <br><span style="color:#6b7280;font-size:11.5px;">（条件 stepIndex &lt; N-2 控制：仅 step 0,1 有步间同步）</span>
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-sub2main">Sub→Main</span>
+          <b>RS 结束</b>：GetNotifyIdxSubToMain（主线程索引 [0,1,2]）+ PostSyncInterThreads
+          <br>从线程写主线程 notify[0,1,2]，回报 RS 全部完成
+        </div>
+      </div>
+    </div>
+
+    <div class="notify-card">
+      <h4>AllGather 阶段（2 次同步）</h4>
+      <div class="timeline">
+        <div class="timeline-item">
+          <span class="step-tag tag-main2sub">Main→Sub</span>
+          <b>AG 启动</b>：NotifyIdxMainToSubInAG（从线程索引 2，AGThreadIndex=2）+ PreSyncInterThreads
+          <br>主线程写各从线程的 notify[2]，唤醒从线程开始 AG
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-exec">执行</span>
+          <b>AllGather</b>：遍历 N=4 个 rank，own 用 LocalCopy，对端用 SendRecvRead
+        </div>
+        <div class="timeline-item">
+          <span class="step-tag tag-sub2main">Sub→Main</span>
+          <b>AG 结束</b>：NotifyIdxSubToMainInAG（主线程索引 [8,7,6]，AGThreadNum=3）+ PostSyncInterThreads
+          <br>公式：<code>3×(threadNum-1) - notifyIdx - 1 = 9 - notifyIdx - 1 = 8 - notifyIdx</code>
+        </div>
+      </div>
+    </div>
+
+    <h3>4. 同步次数统计</h3>
+    <table>
+      <thead><tr><th>阶段</th><th>PreSync</th><th>步间 Post+Pre</th><th>PostSync</th><th>小计</th></tr></thead>
+      <tbody>
+        <tr><td>ReduceScatter</td><td>1</td><td>2 × 2 = 4（step0、step1 各 1 对）</td><td>1</td><td class="highlight"><b>6</b></td></tr>
+        <tr><td>AllGather</td><td>1</td><td>0（AG 无步间同步）</td><td>1</td><td class="highlight"><b>2</b></td></tr>
+        <tr class="highlight"><td><b>总计</b></td><td><b>2</b></td><td><b>4</b></td><td><b>2</b></td><td><b>8</b></td></tr>
+      </tbody>
+    </table>
+    <div class="note-box">
+      <b>N 秩通式</b>：RS 步间同步对数 = N-2（step 0 到 N-3），每对 2 次同步。<br>
+      总同步次数 = 1(RS Pre) + 2(N-2)(步间) + 1(RS Post) + 1(AG Pre) + 1(AG Post) = <b>2N</b>
+    </div>
+
+    <h3>5. 线程与 Notify 资源总览</h3>
+    <table>
+      <thead><tr><th>线程</th><th>角色</th><th>Notify 索引</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td>主线程 Thread[0]</td><td>调度 + own 数据</td><td>0-8（共 9 个）</td><td>0-2: RS启动/结束; 3-5: RS步间; 6-8: AG结束（倒序）</td></tr>
+        <tr><td>从线程 Thread[1]</td><td>slave 0</td><td>0, 1, 2</td><td>0: RS启动/结束; 1: RS步间; 2: AG启动/结束</td></tr>
+        <tr><td>从线程 Thread[2]</td><td>slave 1</td><td>0, 1, 2</td><td>同上</td></tr>
+        <tr><td>从线程 Thread[3]</td><td>slave 2</td><td>0, 1, 2</td><td>同上</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>HCCL AllReduce 模板综合对比</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Consolas", monospace, sans-serif;
+    background: #f5f7fa;
+    color: #222;
+    padding: 24px 16px 60px;
+    line-height: 1.85;
+  }
+  h1 {
+    text-align: center;
+    font-size: 24px;
+    margin: 8px 0 4px;
+    color: #1a1a2e;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 28px;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    margin: 0 auto 30px;
+    max-width: 1700px;
+    padding: 18px 22px 26px;
+  }
+  .card h2 {
+    font-size: 18px;
+    margin: 4px 0 14px;
+    border-left: 5px solid #7c3aed;
+    padding-left: 10px;
+    color: #1a1a2e;
+  }
+  .card h3 {
+    font-size: 15px;
+    font-weight: 700;
+    color: #2b3a48;
+    margin: 18px 0 8px;
+    padding-left: 12px;
+    border-left: 3px solid #7c3aed;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12.5px;
+    margin: 10px 0 16px;
+  }
+  th, td {
+    border: 1px solid #dde2e8;
+    padding: 8px 10px;
+    text-align: center;
+    line-height: 1.6;
+  }
+  th {
+    background: #eef2ff;
+    color: #1e1b4b;
+    font-weight: 600;
+  }
+  td.k {
+    background: #f7f9fb;
+    font-weight: 600;
+    text-align: left;
+    color: #374151;
+    white-space: nowrap;
+  }
+  td.best { background: #d1fae5; color: #065f46; font-weight: 700; }
+  td.worst { background: #fee2e2; color: #991b1b; font-weight: 600; }
+  td.highlight { background: #fef3c7; font-weight: 700; color: #92400e; }
+  .formula {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 12.5px;
+    color: #0f172a;
+    margin: 8px 0 12px;
+    line-height: 1.7;
+  }
+  .note-box {
+    background: #fefce8;
+    border: 1px solid #fde68a;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12.5px;
+    color: #854d0e;
+    margin: 10px 0;
+    line-height: 1.7;
+  }
+  .scene-box {
+    background: #f5f3ff;
+    border: 1px solid #ddd6fe;
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 13px;
+    line-height: 1.8;
+    color: #4c1d95;
+  }
+  .scene-box b { color: #5b21b6; }
+  .algo-tree {
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-radius: 8px;
+    padding: 14px 18px;
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+    line-height: 1.9;
+    color: #166534;
+    white-space: pre;
+    overflow-x: auto;
+  }
+  .tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-right: 4px;
+  }
+  .tag-mesh { background: #dbeafe; color: #1e40af; }
+  .tag-nhr { background: #f3e8ff; color: #6b21a8; }
+  .tag-special { background: #fce7f3; color: #9d174d; }
+  .scroll-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+
+<h1>HCCL AllReduce 模板综合对比</h1>
+<div class="subtitle">
+  OneShot / TwoShot / NHR / MeshChunk / AicpuReduceNHR &nbsp;|&nbsp;
+  数据来源：HCCL MC2 源码分析
+</div>
+
+<!-- ===== 场景设定 ===== -->
+<div class="card">
+  <h2>场景设定与关键公式</h2>
+  <div class="scene-box">
+    <b>数据切分场景</b>：rankSize = <b>5</b>（非 2^i），dataType = <b>u64</b>（8 字节），dataSize = <b>34.125 MB</b>（dataCount = 4,472,832），hcclBuff.size = <b>4 MB</b>，HCCL_MIN_SLICE_ALIGN = 128 字节。<br>
+    <b>性能对比场景</b>：rank = 4（ds 能被 4 整除）和 rank = N（N = 2^i，N ≥ 2，ds 能被 N 整除）。
+  </div>
+  <div class="formula">
+    maxDataSizePerLoop = min(hcclBuff.size, hcclBuff.size / mult / 128 × 128)<br>
+    maxDataCountPerLoop = maxDataSizePerLoop / dataTypeSize_<br>
+    loopTimes = ⌈dataCount_ / maxDataCountPerLoop⌉
+  </div>
+</div>
+
+<!-- ===== 循环次数对比 ===== -->
+<div class="card">
+  <h2>1. 循环次数与末轮数据对比（rankSize=5, u64, dataSize=34.125MB）</h2>
+  <div class="scroll-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>模板</th>
+        <th>CalcScratchMultiple</th>
+        <th>scratchBoundDataSize</th>
+        <th>maxDataSizePerLoop</th>
+        <th>maxDataCountPerLoop</th>
+        <th>loopTimes</th>
+        <th>末轮 currDataCount</th>
+        <th>末轮 currDataSize</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td class="k"><span class="tag tag-mesh">Mesh</span>OneShot</td><td>5</td><td>838,784</td><td>838,784</td><td>104,848</td><td class="worst">43</td><td>69,216</td><td>553,728 B</td></tr>
+      <tr><td class="k"><span class="tag tag-mesh">Mesh</span>TwoShot</td><td>2</td><td>2,097,152</td><td>2,097,152</td><td>262,144</td><td>18</td><td>16,384</td><td>131,072 B</td></tr>
+      <tr><td class="k"><span class="tag tag-nhr">NHR</span>NHR</td><td>1</td><td>4,194,304</td><td>4,194,304</td><td>524,288</td><td class="best">9</td><td>278,528</td><td>2,228,224 B</td></tr>
+      <tr><td class="k"><span class="tag tag-mesh">Mesh</span>MeshChunk</td><td>2</td><td>2,097,152</td><td>2,097,152</td><td>262,144</td><td>18</td><td>16,384</td><td>131,072 B</td></tr>
+      <tr><td class="k"><span class="tag tag-special">Special</span>AicpuReduceNHR</td><td>5</td><td>838,784</td><td>838,784</td><td>104,848</td><td class="worst">43</td><td>69,216</td><td>553,728 B</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note-box">
+    <b>分析</b>：倍率决定 loop 次数。mult 越大 → scratchBoundDataSize 越小 → maxDataSizePerLoop 越小 → loop 次数越多。NHR（mult=1）循环最少（9次），OneShot/AicpuReduceNHR（mult=5）循环最多（43次）。
+  </div>
+</div>
+
+<!-- ===== rank=4 性能对比 ===== -->
+<div class="card">
+  <h2>2. 性能对比 — rank = 4（ds 能被 4 整除）</h2>
+  <div class="scroll-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:16%">维度</th>
+        <th>OneShot</th>
+        <th>TwoShot</th>
+        <th>NHR</th>
+        <th>MeshChunk</th>
+        <th>AicpuReduceNHR</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td class="k">算法结构</td><td>广播+Reduce</td><td>RS+AG</td><td>RS+AG</td><td>流水RS+AG</td><td>AG+Reduce</td></tr>
+      <tr><td class="k">数据切分</td><td>无切分</td><td>1级（4段）</td><td>1级（4段）</td><td>2级（chunk+sub）</td><td>无切分</td></tr>
+      <tr><td class="k">线程数</td><td>4</td><td>4</td><td class="best">1</td><td>4</td><td class="best">1</td></tr>
+      <tr><td class="k">同步次数</td><td>2</td><td>4</td><td class="best">0</td><td class="worst">8</td><td class="best">0</td></tr>
+      <tr><td class="k">cclBuff 倍率</td><td class="worst">4×</td><td>2×</td><td class="best">1×</td><td>2×</td><td class="worst">4×</td></tr>
+      <tr><td class="k">单 rank 发送量</td><td class="worst">3 × ds</td><td>1.5 × ds</td><td>1.5 × ds</td><td>1.5 × ds</td><td class="worst">3 × ds</td></tr>
+      <tr><td class="k">单 rank 接收量</td><td class="worst">3 × ds</td><td>1.5 × ds</td><td>1.5 × ds</td><td>1.5 × ds</td><td class="worst">3 × ds</td></tr>
+      <tr><td class="k">单 rank 通信总量</td><td class="worst highlight">6 × ds</td><td class="highlight">3 × ds</td><td class="highlight">3 × ds</td><td class="highlight">3 × ds</td><td class="worst highlight">6 × ds</td></tr>
+      <tr><td class="k">LocalCopy 数据量</td><td>1 × ds</td><td class="best">0.5 × ds</td><td>2 × ds</td><td class="best">0.5 × ds</td><td>2 × ds</td></tr>
+      <tr><td class="k">Reduce 方式</td><td>通信后 LocalReduce</td><td>Scatter后 LocalReduce</td><td>通信内联归约</td><td>通信内联归约</td><td>AG后 LocalReduce</td></tr>
+      <tr><td class="k">Reduce 数据量</td><td class="worst">3 × ds</td><td>0.75 × ds</td><td class="best">重叠(0.75ds)</td><td class="best">重叠(0.75ds)</td><td class="worst">3 × ds</td></tr>
+      <tr><td class="k">通信步数</td><td class="best">1 (3路并行)</td><td>2 (各3路并行)</td><td>4 (串行)</td><td>3+1 (流水)</td><td>2 (串行)</td></tr>
+      <tr><td class="k">通信并行度</td><td>N-1=3路</td><td>N-1=3路</td><td class="worst">1路</td><td>N-1=3路</td><td class="worst">1路</td></tr>
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<!-- ===== rank=N 性能对比 ===== -->
+<div class="card">
+  <h2>3. 性能对比 — rank = N（N = 2^i，N ≥ 2）</h2>
+  <div class="scroll-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:16%">维度</th>
+        <th>OneShot</th>
+        <th>TwoShot</th>
+        <th>NHR</th>
+        <th>MeshChunk</th>
+        <th>AicpuReduceNHR</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td class="k">算法结构</td><td>广播+Reduce</td><td>RS+AG</td><td>RS+AG</td><td>流水RS+AG</td><td>AG+Reduce</td></tr>
+      <tr><td class="k">数据切分</td><td>无切分</td><td>1级（N段）</td><td>1级（N段）</td><td>2级</td><td>无切分</td></tr>
+      <tr><td class="k">线程数</td><td>N</td><td>N</td><td class="best">1</td><td>N</td><td class="best">1</td></tr>
+      <tr><td class="k">同步次数</td><td>2</td><td>4</td><td class="best">0</td><td class="worst">2N</td><td class="best">0</td></tr>
+      <tr><td class="k">cclBuff 倍率</td><td class="worst">N×</td><td>2×</td><td class="best">1×</td><td>2×</td><td class="worst">N×</td></tr>
+      <tr><td class="k">单 rank 发送量</td><td class="worst">(N-1)·ds</td><td>2(N-1)/N·ds</td><td>2(N-1)/N·ds</td><td>2(N-1)/N·ds</td><td class="worst">(N-1)·ds</td></tr>
+      <tr><td class="k">单 rank 接收量</td><td class="worst">(N-1)·ds</td><td>2(N-1)/N·ds</td><td>2(N-1)/N·ds</td><td>2(N-1)/N·ds</td><td class="worst">(N-1)·ds</td></tr>
+      <tr><td class="k">单 rank 通信总量</td><td class="worst highlight">2(N-1)·ds</td><td class="highlight">4(N-1)/N·ds</td><td class="highlight">4(N-1)/N·ds</td><td class="highlight">4(N-1)/N·ds</td><td class="worst highlight">2(N-1)·ds</td></tr>
+      <tr><td class="k">LocalCopy 数据量</td><td>1·ds</td><td class="best">2/N·ds</td><td>2·ds</td><td class="best">2/N·ds</td><td>2·ds</td></tr>
+      <tr><td class="k">Reduce 方式</td><td>通信后 LocalReduce</td><td>Scatter后 LocalReduce</td><td>通信内联归约</td><td>通信内联归约</td><td>AG后 LocalReduce</td></tr>
+      <tr><td class="k">Reduce 数据量</td><td class="worst">(N-1)·ds</td><td>(N-1)/N·ds</td><td class="best">重叠</td><td class="best">重叠</td><td class="worst">(N-1)·ds</td></tr>
+      <tr><td class="k">通信步数</td><td class="best">1 (N-1路并行)</td><td>2 (各N-1路并行)</td><td>2log₂N (串行)</td><td>(N-1)+1 (流水)</td><td>log₂N (串行)</td></tr>
+      <tr><td class="k">通信并行度</td><td>N-1路</td><td>N-1路</td><td class="worst">1路</td><td>N-1路</td><td class="worst">1路</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note-box">
+    <b>N-rank 通式说明</b>：<br>
+    • <b>OneShot / AicpuReduceNHR</b>：全量收发，通信总量 = 2(N-1)·ds，随 N 线性增长；cclBuff = N×ds，内存随 N 线性增长。<br>
+    • <b>TwoShot / NHR / MeshChunk</b>：RS+AG 架构，通信总量 = 4(N-1)/N·ds，当 N→∞ 时趋近 4·ds（收敛）。<br>
+    • <b>NHR / AicpuReduceNHR</b>：单线程零同步，通信步数 O(log₂N)，但串行执行无并行度。<br>
+    • <b>MeshChunk</b>：同步次数 = 2N，随 N 线性增长；流水线步数 = N-1，可掩盖延迟但同步开销最重。
+  </div>
+</div>
+
+<!-- ===== Reduce 对比 ===== -->
+<div class="card">
+  <h2>4. Reduce 方式对比</h2>
+  <table>
+    <thead>
+      <tr><th>模板</th><th>Reduce 位置</th><th>Reduce 接口</th><th>Reduce 时机</th><th>特殊数据类型支持</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="k">OneShot</td><td>通信后</td><td><code>LocalReduce</code></td><td>所有通信完成后</td><td class="best">✓ 支持</td></tr>
+      <tr><td class="k">TwoShot</td><td>Scatter 后</td><td><code>LocalReduce</code></td><td>Scatter 完成后</td><td class="best">✓ 支持</td></tr>
+      <tr><td class="k">NHR</td><td>通信内联</td><td><code>SendRecvBatchWriteReduce</code></td><td>每步通信中实时</td><td class="worst">✗ 不支持（DMA限制）</td></tr>
+      <tr><td class="k">MeshChunk</td><td>通信内联</td><td><code>SendRecvBatchWriteReduce</code></td><td>每步通信中实时</td><td class="worst">✗ 不支持（DMA限制）</td></tr>
+      <tr><td class="k">AicpuReduceNHR</td><td>AG 后</td><td><code>LocalReduce</code></td><td>AllGather 完成后</td><td class="best">✓ 专为支持</td></tr>
+    </tbody>
+  </table>
+  <div class="note-box">
+    <b>内联归约 vs 分离归约</b>：<br>
+    • <b>通信内联归约</b>（NHR, MeshChunk）：归约与通信重叠，无额外遍历，但不支持特殊数据类型（DMA 限制）。<br>
+    • <b>分离 LocalReduce</b>（OneShot, TwoShot, AicpuReduceNHR）：支持所有数据类型（AICPU 执行），但归约在通信后单独执行，有额外开销。
+  </div>
+</div>
+
+<!-- ===== 适用场景 ===== -->
+<div class="card">
+  <h2>5. 适用场景对比</h2>
+  <table>
+    <thead>
+      <tr><th>模板</th><th>拓扑要求</th><th>数据量</th><th>数据类型</th><th>定位</th></tr>
+    </thead>
+    <tbody>
+      <tr><td class="k">OneShot</td><td>单级 Mesh</td><td>小数据</td><td>通用</td><td>低延迟、单步广播</td></tr>
+      <tr><td class="k">TwoShot</td><td>单级 Mesh</td><td>大数据</td><td>通用</td><td>省带宽、并行散播</td></tr>
+      <tr><td class="k">NHR</td><td>任意拓扑</td><td>各种数据量</td><td>非 int64/fp64/PROD</td><td class="best">通用兜底</td></tr>
+      <tr><td class="k">MeshChunk</td><td>单级 Mesh(UBX)</td><td>大数据</td><td>非 int64/fp64/PROD</td><td>流水线掩盖延迟</td></tr>
+      <tr><td class="k">AicpuReduceNHR</td><td>任意拓扑</td><td>各种数据量</td><td class="highlight">int64/uint64/fp64/PROD</td><td class="best">特殊类型兜底</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- ===== 算法选择 ===== -->
+<div class="card">
+  <h2>6. 算法选择逻辑</h2>
+  <div class="algo-tree">SelectAicpuAlgo
+├── 特殊数据类型 (int64/uint64/fp64/PROD)  →  <b>InsAllReduceAicpuReduceNHR</b>
+├── 单级 UBX + meshNum == closNum + rank ≤ MAX
+│   ├── dataSize ≤ SMALL_DATA_SIZE          →  <b>InsAllReduceMesh1DOneShot</b>
+│   └── else                                →  <b>InsAllReduceMesh1DTwoShot</b> / <b>MeshChunk</b>
+└── 兜底                                     →  <b>InsAllReduceNHR</b></div>
+  <div class="note-box">
+    <b>u64 场景</b>：对于 u64 数据类型，实际可用的模板为 OneShot / TwoShot / AicpuReduceNHR。选择器会将 u64 路由到 <b>AicpuReduceNHR</b>。NHR / MeshChunk 因 DMA 内联归约限制不适用。
+  </div>
+</div>
+
+<!-- ===== 关键差异根源 ===== -->
+<div class="card">
+  <h2>7. 关键差异根源分析</h2>
+
+  <h3>7.1 cclBuff 倍率差异根源</h3>
+  <table>
+    <thead><tr><th>倍率</th><th>模板</th><th>根源</th></tr></thead>
+    <tbody>
+      <tr><td class="worst">N×</td><td>OneShot, AicpuReduceNHR</td><td>需存储 N 份完整副本（每份 = dataSize），供全量 Reduce</td></tr>
+      <tr><td>2×</td><td>TwoShot, MeshChunk</td><td>需存储 N 份 slice 副本，非均衡切分时 N×ceil(count/N) > dataSize</td></tr>
+      <tr><td class="best">1×</td><td>NHR</td><td>连续分区 + 通信内联归约，无需存储 N 份副本</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.2 通信量差异根源</h3>
+  <table>
+    <thead><tr><th>通信量</th><th>模板</th><th>根源</th></tr></thead>
+    <tbody>
+      <tr><td class="worst">2(N-1)·ds</td><td>OneShot, AicpuReduceNHR</td><td>全量广播/全量收集，每对交换完整 dataSize</td></tr>
+      <tr><td class="best">4(N-1)/N·ds</td><td>TwoShot, NHR, MeshChunk</td><td>ReduceScatter + AllGather，每对仅交换 dataSize/N</td></tr>
+    </tbody>
+  </table>
+
+  <h3>7.3 并行度 vs 同步开销权衡</h3>
+  <div class="formula">
+    高并行 + 高同步                          低并行 + 零同步
+    ←─────────────────────────────────────────────→
+    MeshChunk(2N同步, N-1路并行) → TwoShot(4同步, N-1路) → OneShot(2同步, N-1路) → NHR/AicpuReduceNHR(0同步, 1路)
+  </div>
+  <div class="note-box">
+    • <b>Mesh 系</b>（OneShot/TwoShot/MeshChunk）：多线程并行通信，但有同步开销；适合单级 Mesh 全互连拓扑。<br>
+    • <b>NHR 系</b>（NHR/AicpuReduceNHR）：单线程串行通信，零同步；适合任意拓扑、通用兜底。
+  </div>
+</div>
+
+
+<!-- ===== 追加：MD 3.0 / 3.2 / 3.4 章节 ===== -->
+
+<!-- 3.0 章节 -->
+<div class="card">
+  <h2>8. 为什么 Two-Shot 的 CCL Buffer 需要 2 × dataSize？</h2>
+  <div class="note-box">
+    <b>源码注释</b>（<code>ins_temp_all_reduce_mesh_1D_two_shot.cc:24</code>）：
+    <code>multiple=1且数据非均衡切分时，hcclBuffer会不足，因此用2</code>
+  </div>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:12px;">
+    根本原因：<code>ScatterData</code> 阶段对 cclBuff 的"按本 rank 切片大小等距划槽"布局，叠加 <code>SplitData</code> 的"向上取整"切分策略，在非均衡切分时产生<b>放大效应</b>，使实际占用超过 1× dataSize。
+  </p>
+
+  <h3>8.1 cclBuff 布局——N 个等大槽位</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    本 rank 的 cclBuff 被划分为 N 个连续槽位，<b>每个槽位大小都等于本 rank 负责切片的大小</b> <code>recvSize = sliceInfoList_.at(myRankIdx_).size</code>：
+  </p>
+  <div class="formula">
+    cclBuff: |  slot0  |  slot1  | ... |  slotN-1  |<br>
+    &nbsp;&nbsp;offset: 0 &nbsp;&nbsp;&nbsp;&nbsp; recvSize &nbsp;&nbsp; 2×recvSize &nbsp;&nbsp;&nbsp; (N-1)×recvSize<br>
+    &nbsp;&nbsp;每槽大小: recvSize（等大）
+  </div>
+  <div class="note-box">
+    <b>关键代码</b>：<br>
+    • <code>:199</code> <code>recvSize = sliceInfoList_.at(myRankIdx_).size</code><br>
+    • <code>:216</code> 本地拷贝目的偏移：<code>hcclBuffBaseOffset + remoteIdx * recvSize</code><br>
+    • <code>:236</code> 远端接收目的偏移：<code>hcclBuffBaseOffset + remoteIdx * recvSize</code><br>
+    Scatter 阶段共需 <b>N × recvSize</b> 字节，是 cclBuff 占用的瓶颈。
+  </div>
+
+  <h3>8.2 切分策略——向上取整导致 N × ceil(count/N) > count</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    <code>SplitData:129-160</code>：每个切片元素数 <code>sliceCount = RoundUp(count_, N) = ceil(count/N)</code>，仅末尾切片可能更小。因此对于非末尾 rank：<code>recvSize = ceil(count/N) × dataTypeSize</code>。
+  </p>
+  <div class="formula">
+    当 count % N ≠ 0 时：N × ceil(count/N) > count → N × recvSize > dataSize
+  </div>
+
+  <h3>8.3 放大比量化</h3>
+  <table>
+    <thead><tr><th>count</th><th>N</th><th>ceil(count/N)</th><th>N×ceil(count/N)</th><th>放大比</th><th>1× 够吗</th><th>2× 够吗</th></tr></thead>
+    <tbody>
+      <tr><td>1000</td><td>4</td><td>250</td><td>1000</td><td>1.000×</td><td class="best">✓</td><td class="best">✓</td></tr>
+      <tr><td>1001</td><td>4</td><td>251</td><td>1004</td><td>1.003×</td><td class="worst">✗</td><td class="best">✓</td></tr>
+      <tr><td>5</td><td>4</td><td>2</td><td>8</td><td>1.600×</td><td class="worst">✗</td><td class="best">✓</td></tr>
+      <tr><td>1</td><td>4</td><td>1</td><td>4</td><td>4.000×</td><td class="worst">✗</td><td class="worst">✗</td></tr>
+    </tbody>
+  </table>
+  <div class="note-box">
+    • <b>均衡切分</b>（count 能被 N 整除）：放大比 = 1，1× 即可，2× 冗余。<br>
+    • <b>非均衡切分且 count ≥ N</b>：放大比上限 = <code>2N/(N+1) < 2</code>，<b>2× 恰好覆盖</b>。<br>
+    • <b>count < N 极端小数据</b>：放大比可超过 2，但 Two-Shot 面向大数据，不在主要设计考量内。
+  </div>
+
+  <h3>8.4 结论</h3>
+  <div class="note-box">
+    <code>multiple = 2</code> 是针对"非均衡切分 + count ≥ N"这一常见场景的安全倍率：1 倍会因向上取整放大而不足；2 倍恰好覆盖全部情况。<br>
+    <b>One-Shot 不受影响</b>：其 cclBuff 槽位存完整 dataSize 副本，N 个槽位 = N × dataSize，与倍率 N 严格匹配。
+  </div>
+</div>
+
+<!-- 3.2 章节 -->
+<div class="card">
+  <h2>9. 为什么 MeshChunk multiple=1 时 hcclBuffer 会不足</h2>
+
+  <h3>9.1 代码表面分析：偏移计算本身不溢出</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    所有偏移都是按<b>实际数据大小</b>累加的，理论上 1 × dataSize 足够：
+  </p>
+  <div class="formula">
+    一级切分：sliceInfoVec[rank][0].offset 按 currChunkSize 逐段累加，总累加 = dataSize<br>
+    二级切分：sliceRxOffset_ / sliceTxOffset_ 循环累加 sliceSize[rank][m]，合计 = chunk 实际大小<br>
+    写入地址：cclBuffBaseOff + sliceInfoVec[myAlgRank_][0].offset + sliceRxOffset_
+  </div>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    <b>数值验证</b>（N=4, count=9, dataTypeSize=4B, dataSize=36B）：
+  </p>
+  <table>
+    <thead><tr><th>rank</th><th>chunk offset</th><th>currChunkSize</th><th>二级 sub-slice</th><th>结束偏移</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>0</td><td>12B</td><td>[4B, 4B, 4B]</td><td>12B</td></tr>
+      <tr><td>1</td><td>12</td><td>12B</td><td>[4B, 4B, 4B]</td><td>24B</td></tr>
+      <tr><td>2</td><td>24</td><td>12B</td><td>[4B, 4B, 4B]</td><td>36B</td></tr>
+      <tr><td>3</td><td>36</td><td>0B</td><td>[0, 0, 0]</td><td>36B</td></tr>
+    </tbody>
+  </table>
+  <div class="note-box">最大结束偏移 = 36B = dataSize，<b>不溢出</b>。</div>
+
+  <h3>9.2 深层原因：标称槽位大小 vs 实际数据大小</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    "不足"根源在于 <b>cclBuffer 的槽位布局按标称 chunkSize 规划，而非按实际 currChunkSize</b>。
+  </p>
+  <div class="formula">
+    <b>标称槽位模型</b>：<br>
+    chunkSize = RoundUp(count, N) × dataTypeSize（对齐后的标称大小）<br>
+    每个 rank 的 chunk 槽位统一按 chunkSize 预留（N 个等大槽位）<br>
+    标称总空间 = N × chunkSize<br><br>
+    <b>实际数据模型</b>：<br>
+    前 N-1 个 chunk 实际大小 = chunkSize<br>
+    最后 1 个 chunk 实际大小 = dataSize - (N-1) × chunkSize ≤ chunkSize<br>
+    实际总数据 = dataSize
+  </div>
+  <div class="formula">
+    当 count % N ≠ 0 时：<br>
+    N × chunkSize = N × ceil(count/N) × dataTypeSize > N × (count/N) × dataTypeSize = dataSize<br>
+    即：<b>标称总槽位 > 实际数据总量</b>
+  </div>
+
+  <h3>9.3 为什么需要按标称槽位规划</h3>
+  <div style="font-size:13px;color:#374151;line-height:1.9;padding-left:8px;">
+    <p><b>1. DMA / 通信接口的统一配置</b></p>
+    <p style="padding-left:16px;">SendRecvBatchWriteReduce 写入对端 remote cclBuffer；通信链路的内存注册（remoteCclMem）通常按统一块大小配置描述符；若每个槽位大小不同，DMA 地址映射和边界检查会非常复杂。</p>
+    <p><b>2. 地址计算的简洁性与健壮性</b></p>
+    <p style="padding-left:16px;">按等大槽位：rank k 的 chunk 起始地址 = <code>base + k × chunkSize</code>；无需查表即可计算任意 rank 的 chunk 位置，简化流水线调度逻辑。</p>
+    <p><b>3. 二级 sub-slice 的对齐访问</b></p>
+    <p style="padding-left:16px;">每个 chunk 内部的 sub-slice 索引按标称位置计算；大块/小块混合时，按最大可能的 sub-slice 大小预留槽位更安全。</p>
+  </div>
+
+  <h3>9.4 数值对比：标称 vs 实际</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    <b>例 1：非均衡切分</b>（N=4, count=9, dataSize=36B，chunkSize=12B）
+  </p>
+  <table>
+    <thead><tr><th>维度</th><th>计算公式</th><th>大小</th></tr></thead>
+    <tbody>
+      <tr><td class="k">标称总槽位</td><td>N × chunkSize = 4 × 12B</td><td class="worst"><b>48B</b></td></tr>
+      <tr><td class="k">实际数据量</td><td>dataSize</td><td>36B</td></tr>
+      <tr><td class="k">差值</td><td>48 - 36</td><td class="highlight"><b>12B（溢出 33%）</b></td></tr>
+    </tbody>
+  </table>
+  <div class="note-box">
+    multiple=1 → cclBuffer=36B < 48B → <b>不足</b><br>
+    multiple=2 → cclBuffer=72B > 48B → <b>充足</b>
+  </div>
+
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin:12px 0 8px;">
+    <b>例 2：均衡切分</b>（N=4, count=8, dataSize=32B，chunkSize=8B）
+  </p>
+  <table>
+    <thead><tr><th>维度</th><th>计算公式</th><th>大小</th></tr></thead>
+    <tbody>
+      <tr><td class="k">标称总槽位</td><td>N × chunkSize = 4 × 8B</td><td>32B</td></tr>
+      <tr><td class="k">实际数据量</td><td>dataSize</td><td>32B</td></tr>
+      <tr><td class="k">差值</td><td>32 - 32</td><td class="best"><b>0B（刚好）</b></td></tr>
+    </tbody>
+  </table>
+  <div class="note-box">
+    均衡时 multiple=1 → cclBuffer=32B = 32B → <b>刚好够用</b>。<br>
+    这就解释了注释的精确表述："<b>数据非均衡切分时</b>，hcclBuffer 会不足"——均衡时 1 倍确实够，非均衡时标称槽位膨胀导致不足。
+  </div>
+</div>
+
+<!-- 3.4 章节 -->
+<div class="card">
+  <h2>10. NHR 收发信息（GetReduceScatterStepInfoList / GetAllGatherStepInfoList）</h2>
+
+  <h3>10.1 NHRStepInfo 结构体</h3>
+  <div class="formula">
+    struct NHRStepInfo {<br>
+    &nbsp;&nbsp;u32 step = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// 当前步数<br>
+    &nbsp;&nbsp;u32 myRank = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// 本 rank 索引<br>
+    &nbsp;&nbsp;u32 nSlices;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// 本步交换的 slice 数量<br>
+    &nbsp;&nbsp;u32 toRank = 0;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// 发送目标 rank<br>
+    &nbsp;&nbsp;u32 fromRank = 0;&nbsp;&nbsp;&nbsp;&nbsp;// 接收来源 rank<br>
+    &nbsp;&nbsp;std::vector&lt;u32&gt; txSliceIdxs;&nbsp;&nbsp;// 发送的 slice 索引列表<br>
+    &nbsp;&nbsp;std::vector&lt;u32&gt; rxSliceIdxs;&nbsp;&nbsp;// 接收的 slice 索引列表<br>
+    };
+  </div>
+
+  <h3>10.2 ReduceScatter 每步通信信息</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    <code>GetReduceScatterStepInfoList</code>：对于 RS，rank 间间隔逐渐增大，nSlices 逐渐减小。
+  </p>
+  <div class="formula">
+    for (u32 step = 0; step &lt; nSteps; step++) {<br>
+    &nbsp;&nbsp;// 计算通信对象<br>
+    &nbsp;&nbsp;u32 deltaRank = 1 &lt;&lt; step;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;// 步长：1, 2, 4, ...<br>
+    &nbsp;&nbsp;u32 sendToIdx = (myRankIdx_ + N - deltaRank) % N;&nbsp;&nbsp;// 发送目标<br>
+    &nbsp;&nbsp;u32 recvFromIdx = (myRankIdx_ + deltaRank) % N;&nbsp;&nbsp;&nbsp;&nbsp;// 接收来源<br>
+    &nbsp;&nbsp;// 数据份数<br>
+    &nbsp;&nbsp;u32 nSlices = (N - 1 + (1 &lt;&lt; step)) / (1 &lt;&lt; (step + 1));<br>
+    }
+  </div>
+
+  <h3>10.3 AllGather 每步通信信息</h3>
+  <p style="font-size:13px;color:#374151;line-height:1.9;margin-bottom:8px;">
+    对于 AG，rank 间间隔逐渐减小，nSlices 逐渐增大（与 RS 对称）。
+  </p>
+  <div class="formula">
+    for (u32 step = 0; step &lt; nSteps; step++) {<br>
+    &nbsp;&nbsp;u32 deltaRank = 1 &lt;&lt; (nSteps - 1 - step);&nbsp;&nbsp;// 步长递减：2^(nSteps-1), ..., 2, 1<br>
+    &nbsp;&nbsp;u32 sendToIdx = (myRankIdx_ + deltaRank) % N;<br>
+    &nbsp;&nbsp;u32 recvFromIdx = (myRankIdx_ + N - deltaRank) % N;<br>
+    &nbsp;&nbsp;u32 nSlices = (N - 1 + (1 &lt;&lt; (nSteps - 1 - step))) / (1 &lt;&lt; (nSteps - step));<br>
+    }
+  </div>
+
+  <h3>10.4 N=5 示例（myRankIdx=1）</h3>
+  <table>
+    <thead><tr><th>阶段</th><th>step</th><th>deltaRank</th><th>toRank</th><th>fromRank</th><th>nSlices</th><th>txSliceIdxs</th><th>rxSliceIdxs</th></tr></thead>
+    <tbody>
+      <tr><td rowspan="3"><b>RS</b></td><td>0</td><td>1</td><td>0</td><td>2</td><td>2</td><td>[0, 3]</td><td>[1, 4]</td></tr>
+      <tr><td>1</td><td>2</td><td>4</td><td>3</td><td>1</td><td>[4]</td><td>[1]</td></tr>
+      <tr><td>2</td><td>4</td><td>2</td><td>0</td><td>1</td><td>[2]</td><td>[1]</td></tr>
+      <tr><td rowspan="3"><b>AG</b></td><td>0</td><td>4</td><td>2</td><td>0</td><td>1</td><td>[1]</td><td>[2]</td></tr>
+      <tr><td>1</td><td>2</td><td>4</td><td>3</td><td>1</td><td>[1]</td><td>[4]</td></tr>
+      <tr><td>2</td><td>1</td><td>0</td><td>2</td><td>2</td><td>[1, 4]</td><td>[0, 3]</td></tr>
+    </tbody>
+  </table>
+  <div class="note-box">
+    <b>RS 与 AG 对称</b>：AG 的 deltaRank 顺序与 RS 相反（4→2→1），toRank/fromRank 互换，nSlices 递增。RS 负责归约分散，AG 负责收集广播，二者共同完成 AllReduce。
+  </div>
+</div>
+
+</body>
+</html>

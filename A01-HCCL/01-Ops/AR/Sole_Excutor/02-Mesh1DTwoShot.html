@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>HCCL AllReduce Mesh1D Two-Shot 数据传输示意图（4 Rank）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Consolas", monospace, sans-serif;
+    background: #fafbfc;
+    color: #222;
+    margin: 0;
+    padding: 24px 16px 60px;
+    line-height: 1.85;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    margin: 8px 0 4px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 24px;
+    line-height: 1.9;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    margin: 0 auto 34px;
+    max-width: 1660px;
+    padding: 18px 22px 26px;
+  }
+  .card h2 {
+    font-size: 18px;
+    margin: 4px 0 2px;
+    border-left: 5px solid #4A90D9;
+    padding-left: 10px;
+  }
+  .card.twoshot h2 { border-left-color: #E0533D; }
+  .card .desc {
+    color: #555;
+    font-size: 12.5px;
+    line-height: 1.95;
+    margin: 8px 0 6px;
+    padding-left: 15px;
+  }
+  .card .subhead {
+    font-size: 14px;
+    font-weight: 700;
+    color: #2b3a48;
+    margin: 22px 0 6px;
+    padding-left: 15px;
+    border-left: 3px solid #4A90D9;
+  }
+  .card.twoshot .subhead { border-left-color: #E0533D; }
+  svg { display: block; margin: 0 auto; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 26px;
+    justify-content: center;
+    margin-top: 16px;
+    font-size: 12px;
+    color: #444;
+  }
+  .legend .item { display: flex; align-items: center; gap: 7px; }
+  .legend .sw { width: 20px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.2); }
+  .legend .line { width: 26px; height: 0; border-top-width: 3px; border-top-style: solid; }
+  .note {
+    font-size: 11.5px; color: #888; text-align: center; margin-top: 10px; line-height: 1.9;
+  }
+  code { background:#f2f4f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .cmp {
+    max-width: 1660px; margin: 0 auto 34px; border-collapse: collapse; width: 100%;
+    background:#fff; font-size: 12.5px;
+  }
+  .cmp caption { font-size: 15px; font-weight: 700; color:#2b3a48; text-align:left; padding: 6px 4px 12px; }
+  .cmp th, .cmp td { border: 1px solid #dde2e8; padding: 9px 12px; text-align: center; line-height: 1.7; }
+  .cmp th { background: #eef2f7; color:#2b3a48; }
+  .cmp td.k { background:#f7f9fb; font-weight:600; text-align:left; }
+  .cmp td.one { color:#1F5FA8; }
+  .cmp td.two { color:#B23A28; }
+</style>
+</head>
+<body>
+<body>
+
+<h1>HCCL AllReduce Mesh1D Two-Shot 数据传输示意图（4 Rank）</h1>
+<div class="subtitle">模板：<code>InsTempAllReduceMesh1DTwoShot</code><br>每 rank 输入数据量记为 <b>dataSize</b>（count 可被 4 整除，均衡切分）。in / cclBuffer / out 三块 buffer 间的数据流与数据量均已标注；不同数据块以不同颜色标识。</div>
+
+<!-- ============ 模板二：TwoShot ============ -->
+<div class="card twoshot">
+  <h2>Mesh1D Two-Shot &nbsp;——&nbsp; ReduceScatter + AllGather（双通信阶段）</h2>
+  <div class="desc">
+    <b>数据切分：</b><u>按数据维均分</u>为 <b>4 段 slice</b>（各 dataSize/4），rank r 负责 slice r 的归约。cclBuffer 倍数 = 2。<br>
+    <b>核心流程：</b>① <b>Scatter</b>：<code>SendRecvBatchWrite</code> 把本地各 slice 发给对应 owner，收齐“所有 rank 的 slice r”到本地 4 个槽位；② <b>ReduceData</b>：把槽 1/2/3 累加进槽 0，得 slice r 的全局归约 Σr；③ <b>AllGather(Read)</b>：<code>SendRecvBatchRead</code> 从各 rank 读回其 Σs，拼满 out。<br>
+    <b>颜色规则：</b>按 <b>slice 编号</b> —— slice0=蓝，slice1=橙，slice2=绿，slice3=紫；带 “Σ” 且深色的块表示该 slice 完成 4-rank 归约。
+  </div>
+
+  <div class="subhead">阶段总览（in / cclBuffer / out 数据流，rank 视角）</div>
+  <svg id="two_pipeline" width="1620" height="540" viewBox="0 0 1620 540"></svg>
+
+  <div class="subhead">各 rank 间通信拓扑（ReduceScatter mesh &amp; AllGather mesh）</div>
+  <svg id="two_topo" width="1620" height="340" viewBox="0 0 1620 340"></svg>
+  <div class="legend" id="two_legend"></div>
+</div>
+
+
+<div class="note">说明：本图为静态数据流示意，箭头旁标注为对应阶段的传输数据量（每 rank 视角）。<br>Two-Shot 的 Scatter 以 <b>in</b> write 写对端 <b>cclBuffer</b>，AllGather 以 Read 从对端 <b>cclBuffer</b> 读入本地 <b>out</b>。</div>
+
+<script>
+const SVGNS = "http://www.w3.org/2000/svg";
+
+// ---------- 颜色 ----------
+const C = ["#4A90D9", "#E8943A", "#5FA855", "#9B59B6"];     // 浅色（rank / slice 原始块）
+const C_DK = ["#1F5FA8", "#B26608", "#2F7A2A", "#6E3B8A"];  // 深色（归约结果）
+const EMPTY = "#EAECEF";
+const BC_COLOR = "#3A7BD5";   // 广播 / AllGather 通信
+const RS_COLOR = "#E0533D";   // ReduceScatter / 本地 Reduce
+const COPY_COLOR = "#7A8A99"; // 本地拷贝
+
+function el(tag, attrs){ const e=document.createElementNS(SVGNS,tag); for(const k in attrs) e.setAttribute(k,attrs[k]); return e; }
+
+function add(svg,tag,attrs){ const e=el(tag,attrs); svg.appendChild(e); return e; }
+
+function txt(svg,x,y,s,opt={}){
+  const t=add(svg,"text",{x,y,"text-anchor":opt.anchor||"middle","font-size":opt.size||12,
+    "font-family":opt.mono?"Consolas, monospace":"'PingFang SC','Microsoft YaHei',sans-serif",
+    "font-weight":opt.bold?"700":"400", fill:opt.fill||"#333"});
+  t.textContent=s; return t;
+}
+
+function defsArrows(svg){
+  const defs=add(svg,"defs",{});
+  [["arrBC",BC_COLOR],["arrRS",RS_COLOR],["arrCopy",COPY_COLOR],["arrPhase","#5b6b7a"]].forEach(([id,c])=>{
+    const m=el("marker",{id,viewBox:"0 0 10 10",refX:"8.5",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
+    m.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:c})); defs.appendChild(m);
+  });
+  return defs;
+}
+
+function block(svg,x,y,w,h,color,label,opt={}){
+  add(svg,"rect",{x,y,width:w,height:h,rx:4,ry:4,fill:color,
+    stroke:opt.stroke||"rgba(0,0,0,0.25)","stroke-width":opt.sw||1,
+    "stroke-dasharray":opt.dash||"none"});
+  if(label) txt(svg,x+w/2,y+h/2+4,label,{size:opt.lsize||12,bold:opt.bold,mono:true,fill:opt.textFill||"#fff"});
+  if(opt.sub) txt(svg,x+w/2,y-5,opt.sub,{size:9.5,fill:"#8a97a3"});
+}
+
+function sumBlock(svg,x,y,w,h,label,size){
+  const defs=svg.querySelector("defs")||defsArrows(svg);
+  const id="sg"+(gradSeq++);
+  const g=el("linearGradient",{id,x1:"0",y1:"0",x2:"1",y2:"1"});
+  [["0%",C_DK[0]],["33%",C_DK[1]],["66%",C_DK[2]],["100%",C_DK[3]]].forEach(([o,c])=>g.appendChild(el("stop",{offset:o,"stop-color":c})));
+  defs.appendChild(g);
+  add(svg,"rect",{x,y,width:w,height:h,rx:4,fill:"url(#"+id+")",stroke:"#111","stroke-width":2});
+  txt(svg,x+w/2,y+h/2+5,label,{bold:true,size:size||14,fill:"#fff",mono:true});
+}
+
+function phaseArrow(svg,x1,x2,y,lines){
+  add(svg,"line",{x1,y1:y,x2:x2-4,y2:y,stroke:"#5b6b7a","stroke-width":2,"marker-end":"url(#arrPhase)"});
+  const c=(x1+x2)/2;
+  lines.forEach((ln,i)=>txt(svg,c,y+22+i*16,ln.t,{size:ln.b?11.5:10.5,bold:ln.b,fill:ln.f||"#4a5a68"}));
+}
+
+function ringNodes(cx,cy,R){ return [{x:cx-R,y:cy-R},{x:cx+R,y:cy-R},{x:cx+R,y:cy+R},{x:cx-R,y:cy+R}]; }
+
+function drawNode(svg,p,label,color){
+  add(svg,"circle",{cx:p.x,cy:p.y,r:26,fill:"#fff",stroke:color||"#4A90D9","stroke-width":2.5});
+  txt(svg,p.x,p.y+5,label,{bold:true,size:14,fill:"#333"});
+}
+
+function edge(svg,a,b,color,marker,label,offset=0,labelSide=1){
+  const dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy);
+  const nx=-dy/len,ny=dx/len;
+  const ax=a.x+nx*offset,ay=a.y+ny*offset,bx=b.x+nx*offset,by=b.y+ny*offset;
+  const ux=(bx-ax)/len,uy=(by-ay)/len,r=28;
+  add(svg,"line",{x1:ax+ux*r,y1:ay+uy*r,x2:bx-ux*r,y2:by-uy*r,stroke:color,"stroke-width":2.2,"marker-end":"url(#"+marker+")"});
+  if(label){ const mx=(ax+bx)/2+nx*12*labelSide,my=(ay+by)/2+ny*12*labelSide; txt(svg,mx,my+3,label,{size:10.5,fill:color,bold:true,mono:true}); }
+}
+
+function drawTwoPipeline(){
+  const svg=document.getElementById("two_pipeline");
+  defsArrows(svg);
+  const bw=38, bh=34, gap=3;
+  const gridW=bw*4+gap*3;
+  const rowY=r=>112+r*72;
+  const sx=[90, 520, 950, 1380];
+  const titles=[
+    ["① 初始 in","每 rank 4 段 slice（各 dataSize/4）"],
+    ["② Scatter → cclBuffer","4 槽 = 各 rank 的 slice r（均为本段）"],
+    ["③ ReduceData","槽1/2/3 累加进槽0 = Σr"],
+    ["④ AllGather → out","out = [Σ0,Σ1,Σ2,Σ3]"]
+  ];
+  titles.forEach((t,i)=>{
+    txt(svg,sx[i]+gridW/2,44,t[0],{bold:true,size:13,fill:"#2b3a48"});
+    txt(svg,sx[i]+gridW/2,62,t[1],{size:10,fill:"#8a97a3"});
+  });
+  for(let r=0;r<4;r++) txt(svg,52,rowY(r)+bh/2+4,"rank"+r,{bold:true,size:12,fill:"#333"});
+
+  // ① in：4 段 slice
+  for(let r=0;r<4;r++)
+    for(let s=0;s<4;s++)
+      block(svg,sx[0]+s*(bw+gap),rowY(r),bw,bh,C[s],r+"\u2223"+s,{lsize:10,sub:(r===0&&s===0)?"slice:0 1 2 3":""});
+  txt(svg,sx[0]+gridW/2,rowY(3)+bh+24,"标签 r\u2223s = rank r 的 slice s",{size:10,fill:"#8a97a3"});
+
+  // ② Scatter 后 cclBuffer：rank r 收齐所有 rank 的 slice r（同色=slice r）
+  for(let r=0;r<4;r++)
+    for(let k=0;k<4;k++){
+      const x=sx[1]+k*(bw+gap);
+      // 来自 rank k 的 slice r
+      block(svg,x,rowY(r),bw,bh,C[r],"D"+k,{lsize:10,bold:true,
+        sub:(r===0)?("from r"+k):""});
+    }
+  txt(svg,sx[1]+gridW/2,rowY(3)+bh+24,"同一行 4 槽都是 slice r（颜色相同），分别来自 4 个 rank",{size:10,fill:"#8a97a3"});
+
+  // ③ ReduceData：槽0 = Σr（深色 slice r），其余标记已累加
+  for(let r=0;r<4;r++)
+    for(let k=0;k<4;k++){
+      const x=sx[2]+k*(bw+gap);
+      if(k===0) block(svg,x,rowY(r),bw,bh,C_DK[r],"\u03A3"+r,{lsize:11,bold:true,stroke:"#111",sw:2});
+      else      block(svg,x,rowY(r),bw,bh,EMPTY,"+",{stroke:"#cfd4d9",dash:"4 3",textFill:"#9aa5b1",lsize:12});
+    }
+  txt(svg,sx[2]+gridW/2,rowY(3)+bh+24,"Σr = 全 4-rank 的 slice r 之和（落在槽0）",{size:10,fill:"#8a97a3"});
+
+  // ④ AllGather → out：4 段 Σs
+  for(let r=0;r<4;r++)
+    for(let s=0;s<4;s++)
+      block(svg,sx[3]+s*(bw+gap),rowY(r),bw,bh,C_DK[s],"\u03A3"+s,{lsize:10,bold:true});
+
+  // 阶段箭头
+  const bandY=418;
+  phaseArrow(svg,sx[0]+gridW+6,sx[1]-6,bandY,[
+    {t:"ReduceScatter · Scatter", b:true, f:RS_COLOR},
+    {t:"SendRecvBatchWrite: in→对端cclBuffer", f:RS_COLOR},
+    {t:"发/收 各 3·(ds/4)=3/4·ds", f:RS_COLOR},
+    {t:"(同时) LocalCopy 本段 ds/4", f:COPY_COLOR}
+  ]);
+  phaseArrow(svg,sx[1]+gridW+6,sx[2]-6,bandY,[
+    {t:"ReduceScatter · ReduceData", b:true, f:RS_COLOR},
+    {t:"槽1/2/3 → 槽0 LocalReduce", f:RS_COLOR},
+    {t:"3·(ds/4)=3/4·ds", f:RS_COLOR}
+  ]);
+  phaseArrow(svg,sx[2]+gridW+6,sx[3]-6,bandY,[
+    {t:"AllGather · Gather (Read)", b:true, f:BC_COLOR},
+    {t:"SendRecvBatchRead 读对端cclBuffer→out", f:BC_COLOR},
+    {t:"发/收 各 3/4·ds", f:BC_COLOR},
+    {t:"(同时) LocalCopy 槽0→out ds/4", f:COPY_COLOR}
+  ]);
+}
+
+function drawTwoTopo(){
+  const svg=document.getElementById("two_topo");
+  defsArrows(svg);
+  const pairs=[[0,1],[1,2],[2,3],[3,0],[0,2],[1,3]];
+
+  // 左：ReduceScatter mesh
+  const c1x=420,c1y=195,R=100;
+  txt(svg,c1x,48,"ReduceScatter（全 mesh · Write）",{bold:true,size:13,fill:RS_COLOR});
+  txt(svg,c1x,66,"每对双向各 dataSize/4；发本段、收本 rank 负责段",{size:10.5,fill:"#8a97a3"});
+  const N1=ringNodes(c1x,c1y,R);
+  pairs.forEach(([a,b])=>{ edge(svg,N1[a],N1[b],RS_COLOR,"arrRS","",6,1); edge(svg,N1[b],N1[a],RS_COLOR,"arrRS","",6,1); });
+  txt(svg,(N1[0].x+N1[1].x)/2,N1[0].y-12,"ds/4",{size:10,fill:RS_COLOR,bold:true,mono:true});
+  for(let r=0;r<4;r++) drawNode(svg,N1[r],"r"+r,RS_COLOR);
+  txt(svg,c1x,c1y-2,"收齐 slice r",{size:10,fill:"#a86a2a",bold:true});
+  txt(svg,c1x,c1y+16,"归约得 Σr",{size:10,fill:"#a86a2a",bold:true});
+
+  // 右：AllGather mesh
+  const c2x=1190,c2y=195;
+  txt(svg,c2x,48,"AllGather（全 mesh · Read）",{bold:true,size:13,fill:BC_COLOR});
+  txt(svg,c2x,66,"每对双向各 dataSize/4，一次读齐",{size:10.5,fill:"#8a97a3"});
+  const N2=ringNodes(c2x,c2y,R);
+  pairs.forEach(([a,b])=>{ edge(svg,N2[a],N2[b],BC_COLOR,"arrBC","",6,1); edge(svg,N2[b],N2[a],BC_COLOR,"arrBC","",6,1); });
+  txt(svg,(N2[0].x+N2[1].x)/2,N2[0].y-12,"ds/4",{size:10,fill:BC_COLOR,bold:true,mono:true});
+  for(let r=0;r<4;r++) drawNode(svg,N2[r],"r"+r,BC_COLOR);
+  txt(svg,c2x,c2y-2,"rank r 提供 Σr",{size:10,fill:"#4779b8",bold:true});
+  txt(svg,c2x,c2y+16,"读齐 4 段到 out",{size:10,fill:"#4779b8",bold:true});
+
+  // 中间
+  txt(svg,800,165,"RS 后每 rank",{size:11,fill:"#888"});
+  txt(svg,800,183,"仅持 1 段 Σr",{size:11,fill:"#888"});
+  txt(svg,800,207,"AllGather 互补",{size:11,fill:"#888"});
+  txt(svg,800,225,"拼回完整 Σ",{size:11,fill:"#888"});
+}
+
+function buildLegend(id,items){
+  const box=document.getElementById(id);
+  items.forEach(it=>{
+    const d=document.createElement("div"); d.className="item";
+    if(it.line){ const l=document.createElement("span"); l.className="line"; l.style.borderTopColor=it.color; d.appendChild(l); }
+    else { const s=document.createElement("span"); s.className="sw"; s.style.background=it.color; if(it.border) s.style.border="2px solid #111"; d.appendChild(s); }
+    const t=document.createElement("span"); t.textContent=it.text; d.appendChild(t); box.appendChild(d);
+  });
+}
+
+// 执行
+drawTwoPipeline();
+drawTwoTopo();
+
+buildLegend("two_legend",[
+  {color:C[0],text:"slice0 数据"},
+  {color:C[1],text:"slice1 数据"},
+  {color:C[2],text:"slice2 数据"},
+  {color:C[3],text:"slice3 数据"},
+  {color:C_DK[0],border:true,text:"Σs：该 slice 完成 4-rank 归约"},
+  {color:EMPTY,text:"已累加 / 空槽"},
+  {line:true,color:RS_COLOR,text:"ReduceScatter 通信（write）"},
+  {line:true,color:BC_COLOR,text:"AllGather 通信（read）"},
+  {line:true,color:COPY_COLOR,text:"本地拷贝"}
+]);
+
+</script>
+
+  
+  <!-- ===== 数据切分与性能对比分析 ===== -->
+  
+  <style>
+    .analysis-card {
+      background: #fff;
+      border: 1px solid #e3e6ea;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+      margin: 0 auto 34px;
+      max-width: 1660px;
+      padding: 18px 22px 26px;
+    }
+    .analysis-card h2 {
+      font-size: 18px;
+      margin: 4px 0 12px;
+      border-left: 5px solid #7c3aed;
+      padding-left: 10px;
+      color: #1a1a2e;
+    }
+    .analysis-card h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #2b3a48;
+      margin: 20px 0 8px;
+      padding-left: 12px;
+      border-left: 3px solid #7c3aed;
+    }
+    .analysis-card .scene-box {
+      background: #f5f3ff;
+      border: 1px solid #ddd6fe;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      line-height: 1.8;
+      color: #4c1d95;
+    }
+    .analysis-card .scene-box b { color: #5b21b6; }
+    .analysis-card table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+      margin: 10px 0 16px;
+    }
+    .analysis-card th, .analysis-card td {
+      border: 1px solid #dde2e8;
+      padding: 8px 10px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .analysis-card th {
+      background: #eef2ff;
+      color: #1e1b4b;
+      font-weight: 600;
+    }
+    .analysis-card td.k {
+      background: #f7f9fb;
+      font-weight: 600;
+      text-align: left;
+      color: #374151;
+    }
+    .analysis-card td.highlight {
+      background: #fef3c7;
+      font-weight: 700;
+      color: #92400e;
+    }
+    .analysis-card .formula {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12.5px;
+      color: #0f172a;
+      margin: 8px 0 12px;
+      line-height: 1.7;
+    }
+    .analysis-card .note-box {
+      background: #fefce8;
+      border: 1px solid #fde68a;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: #854d0e;
+      margin: 10px 0;
+      line-height: 1.7;
+    }
+    .analysis-card .notify-card {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin: 12px 0;
+    }
+    .analysis-card .notify-card h4 {
+      font-size: 14px;
+      color: #166534;
+      margin: 0 0 8px;
+    }
+    .analysis-card .timeline {
+      position: relative;
+      padding-left: 24px;
+      margin: 12px 0;
+    }
+    .analysis-card .timeline::before {
+      content: '';
+      position: absolute;
+      left: 8px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #86efac;
+    }
+    .analysis-card .timeline-item {
+      position: relative;
+      margin-bottom: 14px;
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+    .analysis-card .timeline-item::before {
+      content: '';
+      position: absolute;
+      left: -20px;
+      top: 6px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #22c55e;
+      border: 2px solid #fff;
+    }
+    .analysis-card .timeline-item .step-tag {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .tag-main2sub { background: #dbeafe; color: #1e40af; }
+    .tag-sub2main { background: #fce7f3; color: #9d174d; }
+    .tag-exec { background: #f3f4f6; color: #374151; }
+  </style>
+
+  <div class="analysis-card">
+    <h2>数据切分与性能对比分析</h2>
+    
+    <div class="scene-box">
+      <b>假设场景</b>：rankSize = <b>5</b>（非 2^i），dataType = <b>u64</b>（8 字节），dataSize = <b>34.125 MB</b>（dataCount = 4,472,832），hcclBuff.size = <b>4 MB</b>，HCCL_MIN_SLICE_ALIGN = 128 字节。<br>
+      <b>关键公式</b>：<code>maxDataSizePerLoop = min(hcclBuff.size, hcclBuff.size / mult / 128 × 128)</code>，<code>loopTimes = ⌈dataCount / maxDataCountPerLoop⌉</code>。
+    </div>
+
+
+    <h3>1. 循环次数与末轮数据</h3>
+    <div class="formula">
+      mult = <b>2</b> &nbsp;|&nbsp;
+      scratchBoundDataSize = 4194304 / 2 / 128 × 128 = <b>2,097,152</b> 字节 &nbsp;|&nbsp;
+      maxDataCountPerLoop = <b>262,144</b><br>
+      loopTimes = ⌈4472832 / 262,144⌉ = <b>18</b> &nbsp;|&nbsp;
+      末轮 currDataCount = 4472832 - 17 × 262,144 = <b>16,384</b> &nbsp;|&nbsp;
+      currDataSize = <b>131,072</b> 字节
+    </div>
+
+    <h3>2. 末轮数据切分（按数据维 1 级切分）</h3>
+    <div style="font-size:13px;color:#374151;margin-bottom:10px;line-height:1.7;">按数据维均分为 N=5 段 slice（RoundUp 取整，末段为余量）。sliceCount = RoundUp(16384, 5) = 3277。</div>
+    
+      <div class="formula">sliceCount = ⌈16384 / 5⌉ = 3,277 &nbsp;&nbsp; sliceSize = 3277 × 8 = 26,216 字节</div>
+      <table>
+        <thead><tr><th>slice</th><th>offset (字节)</th><th>count (元素)</th><th>size (字节)</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>slice 0-3</td><td>0 / 26216 / 52432 / 78648</td><td>3,277 (各)</td><td>26,216 (各)</td><td>前 4 段等大</td></tr>
+          <tr class="highlight"><td>slice 4</td><td>104,864</td><td><b>3,276</b></td><td><b>26,208</b></td><td>末段余量 (16384 - 4×3277 = 3276)</td></tr>
+          <tr class="highlight"><td><b>合计</b></td><td>—</td><td><b>16,384</b></td><td><b>131,072</b></td><td>5 段<b>非均衡</b>切分</td></tr>
+        </tbody>
+      </table>
+    <div class="note-box"><b>分析：</b>非均衡切分：末段比其余段少 1 元素（8 字节）。cclBuff 按标称槽位规划时 N×ceil(count/N) > dataSize，因此 multiple=2。</div>
+
+    
+      <h3>3. 性能对比（rank=4 与 rank=2^i 合并）</h3>
+      <table>
+        <thead><tr><th style="width:22%">维度</th><th>rank = 4</th><th>rank = 2^i（N ≥ 2）</th></tr></thead>
+        <tbody><tr><td class="k">算法结构</td><td>RS + AG</td><td>RS + AG</td></tr><tr><td class="k">数据切分</td><td>1级（4段）</td><td>1级（N段）</td></tr><tr><td class="k">线程数</td><td>4</td><td>N</td></tr><tr><td class="k">同步次数</td><td>4</td><td>4</td></tr><tr><td class="k">cclBuff 倍率</td><td class="highlight">2×</td><td class="highlight">2×</td></tr><tr><td class="k">单 rank 发送量</td><td>1.5 × ds</td><td>2(N-1)/N·ds</td></tr><tr><td class="k">单 rank 接收量</td><td>1.5 × ds</td><td>2(N-1)/N·ds</td></tr><tr><td class="k">单 rank 通信总量</td><td class="highlight">3 × ds</td><td class="highlight">4(N-1)/N·ds</td></tr><tr><td class="k">LocalCopy 数据量</td><td>0.5 × ds</td><td>2/N·ds</td></tr><tr><td class="k">Reduce 方式</td><td>Scatter后 LocalReduce</td><td>Scatter后 LocalReduce</td></tr><tr><td class="k">Reduce 数据量</td><td>0.75 × ds</td><td>(N-1)/N·ds</td></tr><tr><td class="k">通信步数</td><td>2 (各3路并行)</td><td>2 (各N-1路并行)</td></tr><tr><td class="k">通信并行度</td><td>N-1=3路</td><td>N-1路</td></tr></tbody>
+      </table>
+
+    <h3>4. 关键结论</h3>
+    <div style="font-size:13px;color:#374151;line-height:1.9;padding-left:8px;">
+      <div>• <b>cclBuff 倍率 = 2×</b>：兼容非均衡切分溢出（标称槽位 N×ceil > dataSize）</div>
+      <div>• <b>loop 次数 = 18</b>：倍率越大，单轮处理数据越小，循环次数越多</div>
+      <div>• <b>五模板横向对比</b>：详见独立文档 <code>A00-模板综合对比.html</code></div>
+      <div>• <b>适用场景</b>：RS+AG 架构，通信量收敛于 4ds（N→∞）；multiple=2 兼容非均衡切分溢出。适合单级Mesh、大数据、省带宽并行散播场景。</div>
+    </div>
+  </div>
+
+</body>
+</html>

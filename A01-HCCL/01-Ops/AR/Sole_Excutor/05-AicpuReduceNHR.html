@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>HCCL AllReduce Aicpu Reduce NHR 数据传输示意图（4 Rank）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Consolas", monospace, sans-serif;
+    background: #fafbfc;
+    color: #222;
+    margin: 0;
+    padding: 24px 16px 60px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    margin: 8px 0 4px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 24px;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    margin: 0 auto 34px;
+    max-width: 1660px;
+    padding: 18px 22px 26px;
+  }
+  .card h2 {
+    font-size: 18px;
+    margin: 4px 0 2px;
+    border-left: 5px solid #4A90D9;
+    padding-left: 10px;
+  }
+  .card .desc {
+    color: #555;
+    font-size: 12.5px;
+    line-height: 1.85;
+    margin: 8px 0 6px;
+    padding-left: 15px;
+  }
+  .card .subhead {
+    font-size: 14px;
+    font-weight: 700;
+    color: #2b3a48;
+    margin: 20px 0 4px;
+    padding-left: 15px;
+    border-left: 3px solid #E0533D;
+  }
+  .card.aicpu h2 { border-left-color: #9B59B6; }
+  svg { display: block; margin: 0 auto; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px 26px;
+    justify-content: center;
+    margin-top: 14px;
+    font-size: 12px;
+    color: #444;
+  }
+  .legend .item { display: flex; align-items: center; gap: 7px; }
+  .legend .sw {
+    width: 20px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.2);
+  }
+  .legend .line { width: 26px; height: 0; border-top-width: 3px; border-top-style: solid; }
+  .note {
+    font-size: 11.5px; color: #888; text-align: center; margin-top: 10px; line-height:1.8;
+  }
+  code { background:#f2f4f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+</style>
+</head>
+<body>
+<body>
+
+<h1>HCCL AllReduce Aicpu Reduce NHR 数据传输示意图（4 Rank）</h1>
+<div class="subtitle">模板：<code>InsTempAllReduceAicpuReduceNHR</code><br>每 rank 输入数据量记为 dataSize，count 可被 4 整除。不同数据块以不同颜色标识。</div>
+
+<!-- ============ 模板二：AicpuReduceNHR ============ -->
+<div class="card aicpu">
+  <h2>Aicpu Reduce NHR &nbsp;——&nbsp; AllGather(NHR, 无Reduce) + 本地 Reduce</h2>
+  <div class="desc">
+    数据切分：cclBuffer 视为 4 个等大 segment（各 dataSize，即完整的 per-rank 数据），cclBuffer 倍数 = 4。
+    先用 NHR AllGather（2 步）把 4 个 rank 的完整数据聚齐到本地 cclBuffer，再在本地对 4 个 segment 做 Reduce 写入 output。<br>
+    颜色按 <b>数据来源 rank</b>：rank0=蓝，rank1=橙，rank2=绿，rank3=紫；output 的 “Σ” 块表示 4-rank 归约结果。
+  </div>
+  <div class="subhead" style="border-left-color:#9B59B6;">阶段总览（in / cclBuffer / out 数据流）</div>
+  <svg id="aicpu_pipeline" width="1620" height="500" viewBox="0 0 1620 500"></svg>
+  <div class="subhead" style="border-left-color:#9B59B6;">各 rank 间通信拓扑（RunGather / 本地 Reduce）</div>
+  <svg id="aicpu_topo" width="1620" height="400" viewBox="0 0 1620 400"></svg>
+  <div class="legend" id="aicpu_legend"></div>
+</div>
+
+
+<div class="note">说明：本图为静态数据流示意，箭头旁标注为对应阶段的传输数据量（每 rank 视角）。<br>AicpuReduceNHR 全程在 <b>cclBuffer</b> 中 Gather，最后本地 Reduce 写 <b>out</b>。</div>
+
+<script>
+const SVGNS = "http://www.w3.org/2000/svg";
+
+// ---------- 颜色 ----------
+const CHUNK = ["#4A90D9", "#E8943A", "#5FA855", "#9B59B6"];      // 浅色（原始数据块）
+const CHUNK_DK = ["#1F5FA8", "#B26608", "#2F7A2A", "#6E3B8A"];   // 深色（归约结果）
+const EMPTY = "#EAECEF";
+const RS_COLOR = "#E0533D";   // ReduceScatter / 归约通信
+const AG_COLOR = "#3A7BD5";   // AllGather / 拷贝通信
+const COPY_COLOR = "#7A8A99"; // 本地拷贝
+
+function el(tag, attrs) {
+  const e = document.createElementNS(SVGNS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+
+function add(svg, tag, attrs) { const e = el(tag, attrs); svg.appendChild(e); return e; }
+
+function txt(svg, x, y, s, opt={}) {
+  const t = add(svg, "text", {
+    x, y,
+    "text-anchor": opt.anchor || "middle",
+    "font-size": opt.size || 12,
+    "font-family": opt.mono ? "Consolas, monospace" : "'PingFang SC','Microsoft YaHei',sans-serif",
+    "font-weight": opt.bold ? "700" : "400",
+    fill: opt.fill || "#333"
+  });
+  t.textContent = s;
+  return t;
+}
+
+function defsArrows(svg) {
+  const defs = add(svg, "defs", {});
+  [["arrRS", RS_COLOR], ["arrAG", AG_COLOR], ["arrCopy", COPY_COLOR], ["arrPhase", "#5b6b7a"]].forEach(([id, c]) => {
+    const m = el("marker", {id, viewBox:"0 0 10 10", refX:"8.5", refY:"5",
+      markerWidth:"7", markerHeight:"7", orient:"auto-start-reverse"});
+    const p = el("path", {d:"M0,0 L10,5 L0,10 z", fill:c});
+    m.appendChild(p); defs.appendChild(m);
+  });
+  return defs;
+}
+
+function block(svg, x, y, w, h, color, label, opt={}) {
+  add(svg, "rect", {x, y, width:w, height:h, rx:4, ry:4,
+    fill: color,
+    stroke: opt.stroke || "rgba(0,0,0,0.25)",
+    "stroke-width": opt.sw || 1});
+  if (label) txt(svg, x + w/2, y + h/2 + 4, label,
+    {size: opt.lsize || 12, bold: opt.bold, mono:true, fill: opt.textFill || "#fff"});
+  if (opt.sub) txt(svg, x + w/2, y - 4, opt.sub, {size:9.5, fill:"#888"});
+}
+
+function phaseArrow(svg, x1, x2, y, lines) {
+  add(svg, "line", {x1, y1:y, x2:x2-4, y2:y, stroke:"#5b6b7a", "stroke-width":2, "marker-end":"url(#arrPhase)"});
+  const c = (x1+x2)/2;
+  lines.forEach((ln, i) => {
+    txt(svg, c, y + 20 + i*16, ln.t, {size: ln.b?11.5:10.5, bold:ln.b, fill: ln.f || "#4a5a68"});
+  });
+}
+
+function ringNodes(cx, cy, R) {
+  return [
+    {x:cx-R, y:cy-R}, {x:cx+R, y:cy-R}, {x:cx+R, y:cy+R}, {x:cx-R, y:cy+R}
+  ];
+}
+
+function drawNode(svg, p, label, color) {
+  add(svg, "circle", {cx:p.x, cy:p.y, r:26, fill:"#fff", stroke:color||"#4A90D9", "stroke-width":2.5});
+  txt(svg, p.x, p.y+5, label, {bold:true, size:14, fill:"#333"});
+}
+
+function edge(svg, a, b, color, marker, label, offset=0, labelSide=1) {
+  const dx=b.x-a.x, dy=b.y-a.y, len=Math.hypot(dx,dy);
+  const nx=-dy/len, ny=dx/len;
+  const ax=a.x+nx*offset, ay=a.y+ny*offset, bx=b.x+nx*offset, by=b.y+ny*offset;
+  const ux=(bx-ax)/len, uy=(by-ay)/len, r=28;
+  add(svg, "line", {x1:ax+ux*r, y1:ay+uy*r, x2:bx-ux*r, y2:by-uy*r,
+    stroke:color, "stroke-width":2.2, "marker-end":"url(#"+marker+")"});
+  if (label) {
+    const mx=(ax+bx)/2 + nx*12*labelSide, my=(ay+by)/2 + ny*12*labelSide;
+    txt(svg, mx, my+3, label, {size:10.5, fill:color, bold:true, mono:true});
+  }
+}
+
+function drawAicpuPipeline() {
+  const svg = document.getElementById("aicpu_pipeline");
+  defsArrows(svg);
+
+  const RANKC = CHUNK, RANKC_DK = CHUNK_DK;
+  const bw = 46, bh = 34, gap = 3;
+  const rowY = r => 110 + r*62;
+
+  const stageX = [160, 490, 870, 1320];
+  const titles = [
+    ["① 初始 in", "每 rank 完整数据 D_r（dataSize）"],
+    ["② PreCopy → cclBuffer", "D_r 放入 segment r（dataSize）"],
+    ["③ Gather 后 (cclBuffer)", "4 段 = D0,D1,D2,D3 全量"],
+    ["④ 本地 Reduce → out", "out = Σ = D0+D1+D2+D3"]
+  ];
+  titles.forEach((t,i)=>{
+    let w = (i===0||i===3)? bw : bw*4+gap*3;
+    txt(svg, stageX[i]+w/2, 42, t[0], {bold:true, size:13, fill:"#2b3a48"});
+    txt(svg, stageX[i]+w/2, 60, t[1], {size:10, fill:"#8a97a3"});
+  });
+  for (let r=0;r<4;r++) txt(svg, 85, rowY(r)+bh/2+4, "rank"+r, {bold:true, size:12, fill:"#333"});
+
+  // ① in
+  for (let r=0;r<4;r++) block(svg, stageX[0], rowY(r), bw, bh, RANKC[r], "D"+r, {lsize:13, bold:true});
+
+  // ② PreCopy
+  for (let r=0;r<4;r++)
+    for (let s=0;s<4;s++){
+      if (s===r) block(svg, stageX[1]+s*(bw+gap), rowY(r), bw, bh, RANKC[r], "D"+r, {lsize:12, bold:true});
+      else       block(svg, stageX[1]+s*(bw+gap), rowY(r), bw, bh, EMPTY, "", {stroke:"#cfd4d9"});
+    }
+  txt(svg, stageX[1]+(bw*4+gap*3)/2, rowY(3)+bh+24, "cclBuffer 布局：segment s 存放 rank s 的数据", {size:10, fill:"#8a97a3"});
+
+  // ③ Gather 后
+  for (let r=0;r<4;r++)
+    for (let s=0;s<4;s++)
+      block(svg, stageX[2]+s*(bw+gap), rowY(r), bw, bh, RANKC[s], "D"+s, {lsize:12, bold:true});
+
+  // ④ out
+  const defs = svg.querySelector("defs");
+  const g = el("linearGradient", {id:"sumgrad", x1:"0", y1:"0", x2:"1", y2:"1"});
+  [["0%",CHUNK_DK[0]],["33%",CHUNK_DK[1]],["66%",CHUNK_DK[2]],["100%",CHUNK_DK[3]]].forEach(([o,c])=>{
+    g.appendChild(el("stop",{offset:o,"stop-color":c}));
+  });
+  defs.appendChild(g);
+  for (let r=0;r<4;r++){
+    add(svg, "rect", {x:stageX[3], y:rowY(r), width:bw, height:bh, rx:4,
+      fill:"url(#sumgrad)", stroke:"#111", "stroke-width":2});
+    txt(svg, stageX[3]+bw/2, rowY(r)+bh/2+5, "\u03A3", {bold:true, size:16, fill:"#fff", mono:true});
+  }
+
+  // 阶段间箭头（下方说明带）
+  const bandY = 395;
+  phaseArrow(svg, stageX[0]+bw+6, stageX[1]-6, bandY, [
+    {t:"PreCopy (LocalCopy)", b:true},
+    {t:"in → cclBuffer[seg r]", f:COPY_COLOR},
+    {t:"dataSize", f:COPY_COLOR}
+  ]);
+  phaseArrow(svg, stageX[1]+(bw*4+gap*3)+6, stageX[2]-6, bandY, [
+    {t:"RunGather (NHR AllGather, 2 步)", b:true, f:AG_COLOR},
+    {t:"cclBuffer ↔ 远端 cclBuffer", f:AG_COLOR},
+    {t:"发/收 各 3·dataSize", f:AG_COLOR}
+  ]);
+  phaseArrow(svg, stageX[2]+(bw*4+gap*3)+6, stageX[3]-6, bandY, [
+    {t:"RunReduce (本地)", b:true, f:RS_COLOR},
+    {t:"seg[myIdx]→out 拷贝 dataSize", f:COPY_COLOR},
+    {t:"其余 3 段 LocalReduce 3·dataSize", f:RS_COLOR}
+  ]);
+}
+
+function drawAicpuTopo() {
+  const svg = document.getElementById("aicpu_topo");
+  defsArrows(svg);
+
+  const c1x=380, c1y=210, R=105;
+  txt(svg, c1x, 52, "Gather Step0（deltaRank=2）", {bold:true, size:12.5, fill:AG_COLOR});
+  txt(svg, c1x, 70, "对角通信 0↔2 / 1↔3，各 1 slice = dataSize", {size:10, fill:"#8a97a3"});
+  const N1 = ringNodes(c1x, c1y, R);
+  [[0,2],[1,3]].forEach(([a,b])=>{
+    edge(svg, N1[a], N1[b], AG_COLOR, "arrAG", "dataSize", 6, 1);
+    edge(svg, N1[b], N1[a], AG_COLOR, "arrAG", "", 6, 1);
+  });
+  for (let r=0;r<4;r++) drawNode(svg, N1[r], "r"+r, AG_COLOR);
+
+  const c2x=810, c2y=210;
+  txt(svg, c2x, 52, "Gather Step1（deltaRank=1）", {bold:true, size:12.5, fill:AG_COLOR});
+  txt(svg, c2x, 70, "环形 r→(r+1)，每次发 2 slice = 2·dataSize", {size:10, fill:"#8a97a3"});
+  const N2 = ringNodes(c2x, c2y, R);
+  const ring=[[0,1],[1,2],[2,3],[3,0]];
+  ring.forEach(([a,b])=> edge(svg, N2[a], N2[b], AG_COLOR, "arrAG", "2·dataSize", 7, 1));
+  for (let r=0;r<4;r++) drawNode(svg, N2[r], "r"+r, AG_COLOR);
+
+  const c3x=1280, c3y=205;
+  txt(svg, c3x, 52, "RunReduce（本地，无网络）", {bold:true, size:12.5, fill:RS_COLOR});
+  txt(svg, c3x, 70, "cclBuffer 4 段 → out 归约", {size:10, fill:"#8a97a3"});
+  const segY = 110, segX = c3x-120;
+  const defs = svg.querySelector("defs");
+  const g = el("linearGradient", {id:"sumgrad2", x1:"0", y1:"0", x2:"1", y2:"1"});
+  [["0%",CHUNK_DK[0]],["33%",CHUNK_DK[1]],["66%",CHUNK_DK[2]],["100%",CHUNK_DK[3]]].forEach(([o,c])=>
+    g.appendChild(el("stop",{offset:o,"stop-color":c})));
+  defs.appendChild(g);
+  for (let s=0;s<4;s++){
+    block(svg, segX + s*40, segY, 34, 30, CHUNK_DK[s], "D"+s, {lsize:11, bold:true});
+    add(svg, "line", {x1:segX+s*40+17, y1:segY+30, x2:c3x, y2:segY+95,
+      stroke: s===0?COPY_COLOR:RS_COLOR, "stroke-width":2, "marker-end": s===0?"url(#arrCopy)":"url(#arrRS)"});
+  }
+  add(svg, "rect", {x:c3x-24, y:segY+95, width:48, height:36, rx:5, fill:"url(#sumgrad2)", stroke:"#111","stroke-width":2});
+  txt(svg, c3x, segY+118, "\u03A3 out", {bold:true, size:13, fill:"#fff", mono:true});
+  txt(svg, c3x, segY+152, "seg[myIdx] 拷贝(dataSize)", {size:9.5, fill:COPY_COLOR});
+  txt(svg, c3x, segY+168, "其余 3 段 Reduce(3·dataSize)", {size:9.5, fill:RS_COLOR});
+}
+
+function buildLegend(id, items) {
+  const box = document.getElementById(id);
+  items.forEach(it=>{
+    const d = document.createElement("div"); d.className="item";
+    if (it.line) {
+      const l=document.createElement("span"); l.className="line";
+      l.style.borderTopColor=it.color; d.appendChild(l);
+    } else {
+      const s=document.createElement("span"); s.className="sw";
+      s.style.background=it.color; if(it.border) s.style.border="2px solid #111"; d.appendChild(s);
+    }
+    const t=document.createElement("span"); t.textContent=it.text; d.appendChild(t);
+    box.appendChild(d);
+  });
+}
+
+// 执行绘制
+drawAicpuPipeline();
+drawAicpuTopo();
+
+buildLegend("aicpu_legend", [
+  {color:CHUNK[0], text:"rank0 数据 D0"},
+  {color:CHUNK[1], text:"rank1 数据 D1"},
+  {color:CHUNK[2], text:"rank2 数据 D2"},
+  {color:CHUNK[3], text:"rank3 数据 D3"},
+  {color:"#555", border:true, text:"Σ：4-rank 归约结果"},
+  {color:EMPTY, text:"空 segment"},
+  {line:true, color:AG_COLOR, text:"Gather 通信（AllGather）"},
+  {line:true, color:RS_COLOR, text:"本地 Reduce"},
+  {line:true, color:COPY_COLOR, text:"本地拷贝"}
+]);
+
+</script>
+
+  
+  <!-- ===== 数据切分与性能对比分析 ===== -->
+  
+  <style>
+    .analysis-card {
+      background: #fff;
+      border: 1px solid #e3e6ea;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+      margin: 0 auto 34px;
+      max-width: 1660px;
+      padding: 18px 22px 26px;
+    }
+    .analysis-card h2 {
+      font-size: 18px;
+      margin: 4px 0 12px;
+      border-left: 5px solid #7c3aed;
+      padding-left: 10px;
+      color: #1a1a2e;
+    }
+    .analysis-card h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #2b3a48;
+      margin: 20px 0 8px;
+      padding-left: 12px;
+      border-left: 3px solid #7c3aed;
+    }
+    .analysis-card .scene-box {
+      background: #f5f3ff;
+      border: 1px solid #ddd6fe;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      line-height: 1.8;
+      color: #4c1d95;
+    }
+    .analysis-card .scene-box b { color: #5b21b6; }
+    .analysis-card table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+      margin: 10px 0 16px;
+    }
+    .analysis-card th, .analysis-card td {
+      border: 1px solid #dde2e8;
+      padding: 8px 10px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .analysis-card th {
+      background: #eef2ff;
+      color: #1e1b4b;
+      font-weight: 600;
+    }
+    .analysis-card td.k {
+      background: #f7f9fb;
+      font-weight: 600;
+      text-align: left;
+      color: #374151;
+    }
+    .analysis-card td.highlight {
+      background: #fef3c7;
+      font-weight: 700;
+      color: #92400e;
+    }
+    .analysis-card .formula {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12.5px;
+      color: #0f172a;
+      margin: 8px 0 12px;
+      line-height: 1.7;
+    }
+    .analysis-card .note-box {
+      background: #fefce8;
+      border: 1px solid #fde68a;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: #854d0e;
+      margin: 10px 0;
+      line-height: 1.7;
+    }
+    .analysis-card .notify-card {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin: 12px 0;
+    }
+    .analysis-card .notify-card h4 {
+      font-size: 14px;
+      color: #166534;
+      margin: 0 0 8px;
+    }
+    .analysis-card .timeline {
+      position: relative;
+      padding-left: 24px;
+      margin: 12px 0;
+    }
+    .analysis-card .timeline::before {
+      content: '';
+      position: absolute;
+      left: 8px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #86efac;
+    }
+    .analysis-card .timeline-item {
+      position: relative;
+      margin-bottom: 14px;
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+    .analysis-card .timeline-item::before {
+      content: '';
+      position: absolute;
+      left: -20px;
+      top: 6px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #22c55e;
+      border: 2px solid #fff;
+    }
+    .analysis-card .timeline-item .step-tag {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .tag-main2sub { background: #dbeafe; color: #1e40af; }
+    .tag-sub2main { background: #fce7f3; color: #9d174d; }
+    .tag-exec { background: #f3f4f6; color: #374151; }
+  </style>
+
+  <div class="analysis-card">
+    <h2>数据切分与性能对比分析</h2>
+    
+    <div class="scene-box">
+      <b>假设场景</b>：rankSize = <b>5</b>（非 2^i），dataType = <b>u64</b>（8 字节），dataSize = <b>34.125 MB</b>（dataCount = 4,472,832），hcclBuff.size = <b>4 MB</b>，HCCL_MIN_SLICE_ALIGN = 128 字节。<br>
+      <b>关键公式</b>：<code>maxDataSizePerLoop = min(hcclBuff.size, hcclBuff.size / mult / 128 × 128)</code>，<code>loopTimes = ⌈dataCount / maxDataCountPerLoop⌉</code>。
+    </div>
+
+
+    <h3>1. 循环次数与末轮数据</h3>
+    <div class="formula">
+      mult = <b>5</b> &nbsp;|&nbsp;
+      scratchBoundDataSize = 4194304 / 5 / 128 × 128 = <b>838,784</b> 字节 &nbsp;|&nbsp;
+      maxDataCountPerLoop = <b>104,848</b><br>
+      loopTimes = ⌈4472832 / 104,848⌉ = <b>43</b> &nbsp;|&nbsp;
+      末轮 currDataCount = 4472832 - 42 × 104,848 = <b>69,216</b> &nbsp;|&nbsp;
+      currDataSize = <b>553,728</b> 字节
+    </div>
+
+    <h3>2. 末轮数据切分（按 rank 切分（不切数据维））</h3>
+    <div style="font-size:13px;color:#374151;margin-bottom:10px;line-height:1.7;">cclBuffer 划分为 N=5 个等大槽位，每槽存储完整 currDataSize。与 OneShot 完全相同的 rank-slot 布局。CalcScratchMultiple = N = 5。</div>
+    
+      <table>
+        <thead><tr><th>槽位</th><th>offset (字节)</th><th>size (字节)</th><th>count (元素)</th><th>存储内容</th></tr></thead>
+        <tbody>
+          <tr><td>slot 0</td><td>0</td><td>553,728</td><td>69,216</td><td>rank0 完整数据副本</td></tr>
+          <tr><td>slot 1</td><td>553,728</td><td>553,728</td><td>69,216</td><td>rank1 完整数据副本（own）</td></tr>
+          <tr><td>slot 2</td><td>1,107,456</td><td>553,728</td><td>69,216</td><td>rank2 完整数据副本</td></tr>
+          <tr><td>slot 3</td><td>1,661,184</td><td>553,728</td><td>69,216</td><td>rank3 完整数据副本</td></tr>
+          <tr><td>slot 4</td><td>2,214,912</td><td>553,728</td><td>69,216</td><td>rank4 完整数据副本</td></tr>
+          <tr class="highlight"><td><b>合计</b></td><td>—</td><td><b>2,768,640</b></td><td><b>346,080</b></td><td>cclBuff 占用 2.64 MB (&lt; 4 MB)</td></tr>
+        </tbody>
+      </table>
+    <div class="note-box"><b>分析：</b>切分特点：与 OneShot 完全相同。N=5 的 AllGather 步数 = 3（bit_width(4)=3）。专为支持 u64/int64/fp64/PROD 等特殊数据类型设计，AG 后由 AICPU 执行 LocalReduce。</div>
+
+    
+      <h3>3. 性能对比（rank=4 与 rank=2^i 合并）</h3>
+      <table>
+        <thead><tr><th style="width:22%">维度</th><th>rank = 4</th><th>rank = 2^i（N ≥ 2）</th></tr></thead>
+        <tbody><tr><td class="k">算法结构</td><td>AG + Reduce</td><td>AG + Reduce</td></tr><tr><td class="k">数据切分</td><td>无切分</td><td>无切分</td></tr><tr><td class="k">线程数</td><td>1</td><td>1</td></tr><tr><td class="k">同步次数</td><td>0</td><td>0</td></tr><tr><td class="k">cclBuff 倍率</td><td class="highlight">4×</td><td class="highlight">N×</td></tr><tr><td class="k">单 rank 发送量</td><td>3 × ds</td><td>(N-1)·ds</td></tr><tr><td class="k">单 rank 接收量</td><td>3 × ds</td><td>(N-1)·ds</td></tr><tr><td class="k">单 rank 通信总量</td><td class="highlight">6 × ds</td><td class="highlight">2(N-1)·ds</td></tr><tr><td class="k">LocalCopy 数据量</td><td>2 × ds</td><td>2·ds</td></tr><tr><td class="k">Reduce 方式</td><td>AG后 LocalReduce</td><td>AG后 LocalReduce</td></tr><tr><td class="k">Reduce 数据量</td><td>3 × ds</td><td>(N-1)·ds</td></tr><tr><td class="k">通信步数</td><td>2 (串行)</td><td>log₂N (串行)</td></tr><tr><td class="k">通信并行度</td><td>1路</td><td>1路</td></tr></tbody>
+      </table>
+
+    <h3>4. 关键结论</h3>
+    <div style="font-size:13px;color:#374151;line-height:1.9;padding-left:8px;">
+      <div>• <b>cclBuff 倍率 = 5×</b>：需存储 N 份完整副本，内存随 N 线性增长</div>
+      <div>• <b>loop 次数 = 43</b>：倍率越大，单轮处理数据越小，循环次数越多</div>
+      <div>• <b>五模板横向对比</b>：详见独立文档 <code>A00-模板综合对比.html</code></div>
+      <div>• <b>适用场景</b>：NHR AllGather + AICPU LocalReduce，专为特殊数据类型设计；单线程零同步，内存和通信量与 OneShot 相当。适合任意拓扑、特殊数据类型(u64/int64/fp64/PROD)兜底。</div>
+    </div>
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,1205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>HCCL AllReduce NHR 数据传输示意图（4 Rank）</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", "Consolas", monospace, sans-serif;
+    background: #fafbfc;
+    color: #222;
+    margin: 0;
+    padding: 24px 16px 60px;
+    line-height: 1.85;
+  }
+  h1 {
+    text-align: center;
+    font-size: 22px;
+    margin: 8px 0 4px;
+    letter-spacing: 1px;
+  }
+  .subtitle {
+    text-align: center;
+    color: #666;
+    font-size: 13px;
+    margin-bottom: 24px;
+    line-height: 1.9;
+  }
+  .card {
+    background: #fff;
+    border: 1px solid #e3e6ea;
+    border-radius: 10px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+    margin: 0 auto 34px;
+    max-width: 1820px;
+    padding: 18px 22px 26px;
+  }
+  .card h2 {
+    font-size: 18px;
+    margin: 4px 0 2px;
+    border-left: 5px solid #8E44AD;
+    padding-left: 10px;
+  }
+  .card.topo h2 { border-left-color: #2E7D9E; }
+  .card .desc {
+    color: #555;
+    font-size: 12.5px;
+    line-height: 1.95;
+    margin: 8px 0 6px;
+    padding-left: 15px;
+  }
+  .card .subhead {
+    font-size: 14px;
+    font-weight: 700;
+    color: #2b3a48;
+    margin: 22px 0 6px;
+    padding-left: 15px;
+    border-left: 3px solid #8E44AD;
+  }
+  .card.topo .subhead { border-left-color: #2E7D9E; }
+  svg { display: block; margin: 0 auto; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px 26px;
+    justify-content: center;
+    margin-top: 16px;
+    font-size: 12px;
+    color: #444;
+  }
+  .legend .item { display: flex; align-items: center; gap: 7px; }
+  .legend .sw { width: 20px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.2); }
+  .legend .line { width: 26px; height: 0; border-top-width: 3px; border-top-style: solid; }
+  .note {
+    font-size: 11.5px; color: #888; text-align: center; margin-top: 10px; line-height: 1.9;
+  }
+  code { background:#f2f4f7; padding:1px 5px; border-radius:4px; font-size:12px; }
+  .cmp {
+    max-width: 1820px; margin: 0 auto 34px; border-collapse: collapse; width: 100%;
+    background:#fff; font-size: 12.5px;
+  }
+  .cmp caption { font-size: 15px; font-weight: 700; color:#2b3a48; text-align:left; padding: 6px 4px 12px; }
+  .cmp th, .cmp td { border: 1px solid #dde2e8; padding: 9px 12px; text-align: center; line-height: 1.7; }
+  .cmp th { background: #eef2f7; color:#2b3a48; }
+  .cmp td.k { background:#f7f9fb; font-weight:600; text-align:left; }
+  .cmp td.nhr { color:#6E3B8A; }
+  .steps-wrap { overflow-x: auto; margin: 0 auto 10px; }
+  .steps-tbl {
+    width: 100%; border-collapse: collapse; font-size: 12px; background: #fff; min-width: 1200px;
+  }
+  .steps-tbl th, .steps-tbl td {
+    border: 1px solid #dde2e8; padding: 6px 10px; text-align: center; white-space: nowrap;
+  }
+  .steps-tbl th { background: #eef2f7; color: #2b3a48; font-weight: 700; }
+  .steps-tbl tr.grp td { font-weight: 700; text-align: left; padding: 8px 12px; }
+  .steps-tbl tr.grp.rs td { background: #fdf0ee; color: #B23A28; border-left: 4px solid #E0533D; }
+  .steps-tbl tr.grp.ag td { background: #eef4fc; color: #1F5FA8; border-left: 4px solid #3A7BD5; }
+  .steps-tbl td.rs { color: #B23A28; font-weight: 600; }
+  .steps-tbl td.ag { color: #1F5FA8; font-weight: 600; }
+  .steps-tbl tbody tr:nth-child(even):not(.grp) td { background: #f7f9fb; }
+</style>
+</head>
+<body>
+
+<h1>HCCL AllReduce NHR 数据传输示意图（4 Rank）</h1>
+<div class="subtitle">
+  模板：<code>InsTempAllReduceNHR</code> &nbsp;——&nbsp; 递归减半/倍增（Recursive Halving &amp; Doubling）<br>
+  每 rank 输入数据量记为 <b>dataSize</b>（count 可被 4 整除，均衡切分为 4 段，各 dataSize/4）。<br>
+  单线程、零同步、cclBuff = 1× dataSize；ReduceScatter（2 步，通信内联归约）+ AllGather（2 步，纯拷贝）。
+</div>
+
+<!-- ============ Pipeline ============ -->
+<div class="card">
+  <h2>NHR 主流程数据流 &nbsp;——&nbsp; PreCopy → ReduceScatter(2步) → AllGather(2步) → PostCopy</h2>
+  <div class="desc">
+    <b>数据切分：</b>按数据维均分为 <b>4 段 slice</b>（各 dataSize/4），cclBuff 为连续分区布局，总占 1× dataSize。<br>
+    <b>核心流程：</b>① <code>PreCopy</code> usrIn → cclBuff（全量）；② <code>RunReduceScatter</code> 2 步递归减半，每步与 1 个对端通信并 <b>内联归约</b>（<code>SendRecvBatchWriteReduce</code>），最终每 rank 持有 1 个切片的完整 Σ；③ <code>RunAllGather</code> 2 步递归倍增，每步与 1 个对端通信（纯拷贝覆盖），拼回完整 Σ；④ <code>PostCopy</code> cclBuff → usrOut。<br>
+    <b>颜色规则：</b>颜色 = <b>slice 位置</b>（slice0=蓝，slice1=橙，slice2=绿，slice3=紫）；<b>深浅</b> = 归约程度：浅=单 rank 原始，中=部分归约（2 rank），深=完整 Σ（4 rank）。标签 Dk=rank k 原始数据，Da+b=两 rank 之和，Σ=全 4-rank 归约。
+  </div>
+
+  <div class="subhead">阶段总览（usrIn / cclBuff / usrOut 数据流，4 rank 视角）</div>
+  <svg id="pipeline" width="1800" height="580" viewBox="0 0 1800 580"></svg>
+
+  <div class="subhead">通信步详情（每步 toRank / fromRank / 收发切片 / 通信原语 / 效果）</div>
+  <div class="steps-wrap">
+  <table class="steps-tbl">
+    <thead>
+      <tr>
+        <th>阶段 / 步骤</th>
+        <th>rank</th>
+        <th>→ toRank</th>
+        <th>tx slices</th>
+        <th>← fromRank</th>
+        <th>rx slices</th>
+        <th>通信原语</th>
+        <th>通信量</th>
+        <th>本步后 cclBuff 变化</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="grp rs"><td colspan="9">ReduceScatter · Step0（Δ=1，环通信：rank0↔rank1↔rank2↔rank3↔rank0，每 rank 交换 2 slice + 内联归约）</td></tr>
+      <tr><td>RS·Step0</td><td>rank0</td><td>→ rank3</td><td>[3, 1]</td><td>← rank1</td><td>[0, 2]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/2</td><td>s0=D0+D1, s2=D0+D1</td></tr>
+      <tr><td>RS·Step0</td><td>rank1</td><td>→ rank0</td><td>[0, 2]</td><td>← rank2</td><td>[1, 3]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/2</td><td>s1=D1+D2, s3=D1+D2</td></tr>
+      <tr><td>RS·Step0</td><td>rank2</td><td>→ rank1</td><td>[1, 3]</td><td>← rank3</td><td>[2, 0]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/2</td><td>s0=D2+D3, s2=D2+D3</td></tr>
+      <tr><td>RS·Step0</td><td>rank3</td><td>→ rank2</td><td>[2, 0]</td><td>← rank0</td><td>[3, 1]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/2</td><td>s1=D3+D0, s3=D3+D0</td></tr>
+      <tr class="grp rs"><td colspan="9">ReduceScatter · Step1（Δ=2，对通信：rank0↔rank2, rank1↔rank3，每 rank 交换 1 slice + 内联归约）</td></tr>
+      <tr><td>RS·Step1</td><td>rank0</td><td>→ rank2</td><td>[2]</td><td>← rank2</td><td>[0]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/4</td><td>s0=Σs0（完整归约）</td></tr>
+      <tr><td>RS·Step1</td><td>rank1</td><td>→ rank3</td><td>[3]</td><td>← rank3</td><td>[1]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/4</td><td>s1=Σs1（完整归约）</td></tr>
+      <tr><td>RS·Step1</td><td>rank2</td><td>→ rank0</td><td>[0]</td><td>← rank0</td><td>[2]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/4</td><td>s2=Σs2（完整归约）</td></tr>
+      <tr><td>RS·Step1</td><td>rank3</td><td>→ rank1</td><td>[1]</td><td>← rank1</td><td>[3]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/4</td><td>s3=Σs3（完整归约）</td></tr>
+      <tr class="grp ag"><td colspan="9">AllGather · Step0（Δ=2，对通信：rank0↔rank2, rank1↔rank3，每 rank 交换 1 slice 纯拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank0</td><td>→ rank2</td><td>[0]</td><td>← rank2</td><td>[2]</td><td class="ag">SendRecvWrite</td><td>ds/4</td><td>s2=Σs2（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank1</td><td>→ rank3</td><td>[1]</td><td>← rank3</td><td>[3]</td><td class="ag">SendRecvWrite</td><td>ds/4</td><td>s3=Σs3（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank2</td><td>→ rank0</td><td>[2]</td><td>← rank0</td><td>[0]</td><td class="ag">SendRecvWrite</td><td>ds/4</td><td>s0=Σs0（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank3</td><td>→ rank1</td><td>[3]</td><td>← rank1</td><td>[1]</td><td class="ag">SendRecvWrite</td><td>ds/4</td><td>s1=Σs1（拷贝覆盖）</td></tr>
+      <tr class="grp ag"><td colspan="9">AllGather · Step1（Δ=1，环通信：rank0↔rank1↔rank2↔rank3↔rank0，每 rank 交换 2 slice 纯拷贝覆盖）</td></tr>
+      <tr><td>AG·Step1</td><td>rank0</td><td>→ rank1</td><td>[0, 2]</td><td>← rank3</td><td>[3, 1]</td><td class="ag">SendRecvWrite</td><td>ds/2</td><td>s1=Σs1, s3=Σs3</td></tr>
+      <tr><td>AG·Step1</td><td>rank1</td><td>→ rank2</td><td>[1, 3]</td><td>← rank0</td><td>[0, 2]</td><td class="ag">SendRecvWrite</td><td>ds/2</td><td>s0=Σs0, s2=Σs2</td></tr>
+      <tr><td>AG·Step1</td><td>rank2</td><td>→ rank3</td><td>[2, 0]</td><td>← rank1</td><td>[1, 3]</td><td class="ag">SendRecvWrite</td><td>ds/2</td><td>s1=Σs1, s3=Σs3</td></tr>
+      <tr><td>AG·Step1</td><td>rank3</td><td>→ rank0</td><td>[3, 1]</td><td>← rank2</td><td>[2, 0]</td><td class="ag">SendRecvWrite</td><td>ds/2</td><td>s0=Σs0, s2=Σs2</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="legend" id="pipe_legend"></div>
+</div>
+
+<!-- ============ Topology ============ -->
+<div class="card topo">
+  <h2>通信拓扑 &nbsp;——&nbsp; ReduceScatter（内联归约）&amp; AllGather（纯拷贝）</h2>
+  <div class="desc">
+    NHR 每步仅与 <b>1 个对端</b> 通信（非全 mesh）。ReduceScatter 距离递增（1→2），AllGather 距离递减（2→1），二者互为镜像。单线程串行执行 4 步，无主从同步。
+  </div>
+  <svg id="topo" width="1800" height="560" viewBox="0 0 1800 560"></svg>
+  <div class="legend" id="topo_legend"></div>
+</div>
+
+<!-- ============ 对比表 ============ -->
+<table class="cmp">
+  <caption>NHR 关键特征（4 Rank，均衡切分，单 rank 视角）</caption>
+  <thead>
+    <tr><th>维度</th><th>NHR</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="k">算法结构</td><td class="nhr">ReduceScatter + AllGather</td><td>各 log₂N 步，4 rank 共 4 步</td></tr>
+    <tr><td class="k">线程 / 同步</td><td class="nhr">1 线程 / 0 同步</td><td>单线程串行，无从线程、无 Notify</td></tr>
+    <tr><td class="k">cclBuff 倍率</td><td class="nhr">1 × dataSize</td><td>连续分区布局，通信内联归约无需 N 份副本</td></tr>
+    <tr><td class="k">Reduce 方式</td><td class="nhr">通信内联归约</td><td><code>SendRecvBatchWriteReduce</code>，收发即归约</td></tr>
+    <tr><td class="k">单 rank 发送量</td><td class="nhr">1.5 × dataSize</td><td>RS: ds/2 + ds/4；AG: ds/4 + ds/2</td></tr>
+    <tr><td class="k">单 rank 通信总量</td><td class="nhr"><b>3 × dataSize</b></td><td>发 1.5ds + 收 1.5ds</td></tr>
+    <tr><td class="k">额外 LocalCopy</td><td class="nhr">2 次（PreCopy + PostCopy）</td><td>各 dataSize，共 2× dataSize</td></tr>
+    <tr><td class="k">DMA 模式</td><td class="nhr">自适应</td><td>PCIe 链路用 Read，其余用 Write</td></tr>
+    <tr><td class="k">定位</td><td class="nhr">通用兜底算法</td><td>多级拓扑 / 非标准 Mesh / 内存受限场景</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  说明：本图为静态数据流示意。颜色恒定代表 slice 位置（0/1/2/3），深浅代表归约程度（原始→部分→完整）。<br>
+  ReduceScatter 使用 <code>SendRecvBatchWriteReduce</code>（收发同时归约，local += remote）；AllGather 使用 <code>SendRecvWrite</code>（纯拷贝覆盖，无归约）。
+</div>
+
+<hr style="border:none; border-top:2px dashed #c9d1d9; margin:40px auto; max-width:1820px;">
+
+<h1 style="margin-top:30px;">HCCL AllReduce NHR 数据传输示意图（5 Rank）</h1>
+<div class="subtitle">
+  非 2 次幂场景：N=5，步数 = ⌈log₂5⌉ = 3 步；Step2（Δ=4）为「补齐步」，将最后 1 个 rank 并入归约 / 扩散<br>
+  单 rank 通信总量：<b>3.2 × dataSize</b>（发 1.6ds + 收 1.6ds），全网通信量 16 × dataSize
+</div>
+
+<!-- ============ 5 Rank Pipeline ============ -->
+<div class="card">
+  <h2>NHR 主流程数据流 &nbsp;——&nbsp; PreCopy → ReduceScatter(3步) → AllGather(3步) → PostCopy</h2>
+  <div class="desc">
+    <b>数据切分：</b>均分为 <b>5 段 slice</b>（各 dataSize/5），cclBuff 总占 1× dataSize。<br>
+    <b>核心流程：</b>① PreCopy 全量拷入；② ReduceScatter 3 步递归减半（Δ=1→2→4），每步内联归约，最终每 rank 持 1 个完整 Σ；③ AllGather 3 步递归倍增（Δ=4→2→1），纯拷贝覆盖拼回完整 Σ；④ PostCopy 输出。<br>
+    <b>颜色规则：</b>颜色 = slice 位置（s0蓝 s1橙 s2绿 s3紫 s4青）；深浅 = 归约程度（浅=原始 中=部分 深=完整Σ）。
+  </div>
+
+  <div class="subhead">阶段总览（usrIn / cclBuff / usrOut 数据流，5 rank 视角，分两行：RS 阶段 / AG 阶段）</div>
+  <svg id="pipeline5" width="1800" height="1010" viewBox="0 0 1800 1010"></svg>
+
+  <div class="subhead">通信步详情（每步 toRank / fromRank / 收发切片 / 本步后 cclBuff 变化）</div>
+  <div class="steps-wrap">
+  <table class="steps-tbl">
+    <thead>
+      <tr>
+        <th>阶段 / 步骤</th>
+        <th>rank</th>
+        <th>→ toRank</th>
+        <th>tx slices</th>
+        <th>← fromRank</th>
+        <th>rx slices</th>
+        <th>通信原语</th>
+        <th>通信量</th>
+        <th>本步后 cclBuff 变化</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="grp rs"><td colspan="9">ReduceScatter · Step0（Δ=1，环通信，每 rank 交换 2 slice + 内联归约）</td></tr>
+      <tr><td>RS·Step0</td><td>rank0</td><td>→ rank4</td><td>[4, 2]</td><td>← rank1</td><td>[0, 3]</td><td class="rs">SendRecvBatchWriteReduce</td><td>2ds/5</td><td>s0=D0+D1, s3=D0+D1</td></tr>
+      <tr><td>RS·Step0</td><td>rank1</td><td>→ rank0</td><td>[0, 3]</td><td>← rank2</td><td>[1, 4]</td><td class="rs">SendRecvBatchWriteReduce</td><td>2ds/5</td><td>s1=D1+D2, s4=D1+D2</td></tr>
+      <tr><td>RS·Step0</td><td>rank2</td><td>→ rank1</td><td>[1, 4]</td><td>← rank3</td><td>[2, 0]</td><td class="rs">SendRecvBatchWriteReduce</td><td>2ds/5</td><td>s2=D2+D3, s0=D2+D3</td></tr>
+      <tr><td>RS·Step0</td><td>rank3</td><td>→ rank2</td><td>[2, 0]</td><td>← rank4</td><td>[3, 1]</td><td class="rs">SendRecvBatchWriteReduce</td><td>2ds/5</td><td>s3=D3+D4, s1=D3+D4</td></tr>
+      <tr><td>RS·Step0</td><td>rank4</td><td>→ rank3</td><td>[3, 1]</td><td>← rank0</td><td>[4, 2]</td><td class="rs">SendRecvBatchWriteReduce</td><td>2ds/5</td><td>s4=D4+D0, s2=D4+D0</td></tr>
+      <tr class="grp rs"><td colspan="9">ReduceScatter · Step1（Δ=2，五角星通信，每 rank 交换 1 slice + 内联归约）</td></tr>
+      <tr><td>RS·Step1</td><td>rank0</td><td>→ rank3</td><td>[3]</td><td>← rank2</td><td>[0]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s0 = D0+D1+D2+D3（4-rank 部分 Σ）</td></tr>
+      <tr><td>RS·Step1</td><td>rank1</td><td>→ rank4</td><td>[4]</td><td>← rank3</td><td>[1]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s1 = D1+D2+D3+D4（4-rank 部分 Σ）</td></tr>
+      <tr><td>RS·Step1</td><td>rank2</td><td>→ rank0</td><td>[0]</td><td>← rank4</td><td>[2]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s2 = D0+D2+D3+D4（4-rank 部分 Σ）</td></tr>
+      <tr><td>RS·Step1</td><td>rank3</td><td>→ rank1</td><td>[1]</td><td>← rank0</td><td>[3]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s3 = D0+D1+D3+D4（4-rank 部分 Σ）</td></tr>
+      <tr><td>RS·Step1</td><td>rank4</td><td>→ rank2</td><td>[2]</td><td>← rank1</td><td>[4]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s4 = D0+D1+D2+D4（4-rank 部分 Σ）</td></tr>
+      <tr class="grp rs"><td colspan="9">ReduceScatter · Step2（Δ=4，逆环「补齐步」，将最后 1 rank 并入 → 完整 5-rank Σ）</td></tr>
+      <tr><td>RS·Step2</td><td>rank0</td><td>→ rank1</td><td>[1]</td><td>← rank4</td><td>[0]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s0 = Σs0（完整 5-rank 归约）</td></tr>
+      <tr><td>RS·Step2</td><td>rank1</td><td>→ rank2</td><td>[2]</td><td>← rank0</td><td>[1]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s1 = Σs1（完整 5-rank 归约）</td></tr>
+      <tr><td>RS·Step2</td><td>rank2</td><td>→ rank3</td><td>[3]</td><td>← rank1</td><td>[2]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s2 = Σs2（完整 5-rank 归约）</td></tr>
+      <tr><td>RS·Step2</td><td>rank3</td><td>→ rank4</td><td>[4]</td><td>← rank2</td><td>[3]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s3 = Σs3（完整 5-rank 归约）</td></tr>
+      <tr><td>RS·Step2</td><td>rank4</td><td>→ rank0</td><td>[0]</td><td>← rank3</td><td>[4]</td><td class="rs">SendRecvBatchWriteReduce</td><td>ds/5</td><td>s4 = Σs4（完整 5-rank 归约）</td></tr>
+      <tr class="grp ag"><td colspan="9">AllGather · Step0（Δ=4，逆环，RS Step2 的镜像，纯拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank0</td><td>→ rank4</td><td>[0]</td><td>← rank1</td><td>[1]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s1 = Σs1（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank1</td><td>→ rank0</td><td>[1]</td><td>← rank2</td><td>[2]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s2 = Σs2（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank2</td><td>→ rank1</td><td>[2]</td><td>← rank3</td><td>[3]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s3 = Σs3（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank3</td><td>→ rank2</td><td>[3]</td><td>← rank4</td><td>[4]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s4 = Σs4（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step0</td><td>rank4</td><td>→ rank3</td><td>[4]</td><td>← rank0</td><td>[0]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s0 = Σs0（拷贝覆盖）</td></tr>
+      <tr class="grp ag"><td colspan="9">AllGather · Step1（Δ=2，五角星，纯拷贝覆盖）</td></tr>
+      <tr><td>AG·Step1</td><td>rank0</td><td>→ rank2</td><td>[0]</td><td>← rank3</td><td>[3]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s3 = Σs3（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step1</td><td>rank1</td><td>→ rank3</td><td>[1]</td><td>← rank4</td><td>[4]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s4 = Σs4（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step1</td><td>rank2</td><td>→ rank4</td><td>[2]</td><td>← rank0</td><td>[0]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s0 = Σs0（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step1</td><td>rank3</td><td>→ rank0</td><td>[3]</td><td>← rank1</td><td>[1]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s1 = Σs1（拷贝覆盖）</td></tr>
+      <tr><td>AG·Step1</td><td>rank4</td><td>→ rank1</td><td>[4]</td><td>← rank2</td><td>[2]</td><td class="ag">SendRecvWrite</td><td>ds/5</td><td>s2 = Σs2（拷贝覆盖）</td></tr>
+      <tr class="grp ag"><td colspan="9">AllGather · Step2（Δ=1，环通信，每 rank 交换 2 slice 纯拷贝覆盖）</td></tr>
+      <tr><td>AG·Step2</td><td>rank0</td><td>→ rank1</td><td>[0, 3]</td><td>← rank4</td><td>[4, 2]</td><td class="ag">SendRecvWrite</td><td>2ds/5</td><td>s2=Σs2, s4=Σs4</td></tr>
+      <tr><td>AG·Step2</td><td>rank1</td><td>→ rank2</td><td>[1, 4]</td><td>← rank0</td><td>[0, 3]</td><td class="ag">SendRecvWrite</td><td>2ds/5</td><td>s0=Σs0, s3=Σs3</td></tr>
+      <tr><td>AG·Step2</td><td>rank2</td><td>→ rank3</td><td>[2, 0]</td><td>← rank1</td><td>[1, 4]</td><td class="ag">SendRecvWrite</td><td>2ds/5</td><td>s1=Σs1, s4=Σs4</td></tr>
+      <tr><td>AG·Step2</td><td>rank3</td><td>→ rank4</td><td>[3, 1]</td><td>← rank2</td><td>[2, 0]</td><td class="ag">SendRecvWrite</td><td>2ds/5</td><td>s2=Σs2, s0=Σs0</td></tr>
+      <tr><td>AG·Step2</td><td>rank4</td><td>→ rank0</td><td>[4, 2]</td><td>← rank3</td><td>[3, 1]</td><td class="ag">SendRecvWrite</td><td>2ds/5</td><td>s3=Σs3, s1=Σs1</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="legend" id="pipe5_legend"></div>
+</div>
+
+<!-- ============ 5 Rank Topology ============ -->
+<div class="card topo">
+  <h2>通信拓扑 &nbsp;——&nbsp; 5 Rank（ReduceScatter 3 步 + AllGather 3 步，互为镜像）</h2>
+  <div class="desc">
+    N=5 非 2 次幂场景：前 2 步完成 4-rank 子环归约，第 3 步（Δ=4）将最后 1 个 rank 并入，形成「补齐步」。
+  </div>
+  <svg id="topo5" width="2000" height="660" viewBox="0 0 2000 660"></svg>
+  <div class="legend" id="topo5_legend"></div>
+</div>
+
+<!-- ============ 5 Rank 对比表 ============ -->
+<table class="cmp">
+  <caption>NHR 关键特征（5 Rank，非 2 次幂，单 rank 视角）</caption>
+  <thead>
+    <tr><th>维度</th><th>NHR (N=5)</th><th>说明</th></tr>
+  </thead>
+  <tbody>
+    <tr><td class="k">算法结构</td><td class="nhr">ReduceScatter + AllGather</td><td>各 ⌈log₂N⌉ = 3 步，共 6 步串行</td></tr>
+    <tr><td class="k">线程 / 同步</td><td class="nhr">1 线程 / 0 同步</td><td>单线程串行，无从线程、无 Notify</td></tr>
+    <tr><td class="k">cclBuff 倍率</td><td class="nhr">1 × dataSize</td><td>连续分区布局，通信内联归约</td></tr>
+    <tr><td class="k">Reduce 方式</td><td class="nhr">通信内联归约</td><td>SendRecvBatchWriteReduce，收发即归约</td></tr>
+    <tr><td class="k">单 rank 发送量</td><td class="nhr">1.6 × dataSize</td><td>RS: 2ds/5 + ds/5 + ds/5；AG: ds/5 + ds/5 + 2ds/5</td></tr>
+    <tr><td class="k">单 rank 通信总量</td><td class="nhr"><b>3.2 × dataSize</b></td><td>发 1.6ds + 收 1.6ds</td></tr>
+    <tr><td class="k">全网通信量</td><td class="nhr">16 × dataSize</td><td>5 × 3.2 × dataSize</td></tr>
+    <tr><td class="k">额外 LocalCopy</td><td class="nhr">2 次（PreCopy + PostCopy）</td><td>各 dataSize，共 2× dataSize</td></tr>
+    <tr><td class="k">非 2 次幂特性</td><td class="nhr">Step2 为「补齐步」</td><td>Δ=4，将最后 1 个 rank 并入归约 / 扩散</td></tr>
+    <tr><td class="k">定位</td><td class="nhr">通用兜底算法</td><td>支持任意 rank 数，多级拓扑 / 内存受限场景</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  5 Rank 特性：N 非 2 次幂时，步数 = ⌈log₂N⌉，最后一步为「补齐步」，通信模式由环变为逆环，将剩余 rank 数据并入。<br>
+  与 4 Rank 对比：步数从 4 → 6（+2 步），单 rank 通信量从 3ds → 3.2ds（仅增加约 6.7%），扩展性良好。
+</div>
+
+<script>
+const SVGNS = "http://www.w3.org/2000/svg";
+
+// ---------- 颜色：按 slice 位置 ----------
+const C       = ["#4A90D9", "#E8943A", "#5FA855", "#9B59B6"]; // 浅：单 rank 原始
+const C_MID   = ["#3578B5", "#C26E18", "#3F8A35", "#7E3F9A"]; // 中：部分归约（2 rank）
+const C_DK    = ["#1F5FA8", "#9E5008", "#236B22", "#5E2E78"]; // 深：完整 Σ（4 rank）
+const EMPTY   = "#EAECEF";
+const RS_COLOR  = "#E0533D"; // ReduceScatter 通信（内联归约）
+const AG_COLOR  = "#3A7BD5"; // AllGather 通信（纯拷贝）
+const COPY_COLOR = "#7A8A99"; // 本地拷贝
+const NHR_COLOR = "#8E44AD"; // NHR 主题色
+
+function el(tag, attrs){ const e=document.createElementNS(SVGNS,tag); for(const k in attrs) e.setAttribute(k,attrs[k]); return e; }
+function add(svg,tag,attrs){ const e=el(tag,attrs); svg.appendChild(e); return e; }
+function txt(svg,x,y,s,opt={}){
+  const t=add(svg,"text",{x,y,"text-anchor":opt.anchor||"middle","font-size":opt.size||12,
+    "font-family":opt.mono?"Consolas, monospace":"'PingFang SC','Microsoft YaHei',sans-serif",
+    "font-weight":opt.bold?"700":"400", fill:opt.fill||"#333"});
+  t.textContent=s; return t;
+}
+function defsArrows(svg){
+  let defs=svg.querySelector("defs");
+  if(defs) return defs;
+  defs=add(svg,"defs",{});
+  [["arrRS",RS_COLOR],["arrAG",AG_COLOR],["arrCopy",COPY_COLOR],["arrPhase","#5b6b7a"],["arrNhr",NHR_COLOR]].forEach(([id,c])=>{
+    const m=el("marker",{id,viewBox:"0 0 10 10",refX:"8.5",refY:"5",markerWidth:"7",markerHeight:"7",orient:"auto-start-reverse"});
+    m.appendChild(el("path",{d:"M0,0 L10,5 L0,10 z",fill:c})); defs.appendChild(m);
+  });
+  return defs;
+}
+function sliceColor(s, shade){
+  if(shade===1) return C_MID[s];
+  if(shade===2) return C_DK[s];
+  return C[s];
+}
+// 数据块（slice 位置由颜色决定，shade 决定深浅）
+function block(svg,x,y,w,h,sliceIdx,shade,label,opt={}){
+  add(svg,"rect",{x,y,width:w,height:h,rx:4,ry:4,fill:sliceColor(sliceIdx,shade),
+    stroke:opt.stroke||"rgba(0,0,0,0.3)","stroke-width":opt.sw||1,
+    "stroke-dasharray":opt.dash||"none"});
+  if(label) txt(svg,x+w/2,y+h/2+4,label,{size:opt.lsize||11,bold:true,mono:true,fill:opt.textFill||"#fff"});
+}
+// 渐变 Σ 块（用于 usrIn / usrOut 整体）
+let gradSeq=0;
+function gradBlock(svg,x,y,w,h,colors,label,opt={}){
+  const defs=svg.querySelector("defs")||defsArrows(svg);
+  const id="gg"+(gradSeq++);
+  const g=el("linearGradient",{id,x1:"0",y1:"0",x2:"1",y2:"0"});
+  const n=colors.length;
+  colors.forEach((c,i)=>g.appendChild(el("stop",{offset:Math.round(i*100/(n-1))+"%","stop-color":c})));
+  defs.appendChild(g);
+  add(svg,"rect",{x,y,width:w,height:h,rx:4,fill:"url(#"+id+")",stroke:opt.stroke||"#111","stroke-width":opt.sw||1.5});
+  if(label) txt(svg,x+w/2,y+h/2+5,label,{bold:true,size:opt.lsize||13,fill:opt.textFill||"#fff",mono:true});
+}
+// 阶段大箭头 + 下方多行说明
+function phaseArrow(svg,x1,x2,y,lines){
+  add(svg,"line",{x1,y1:y,x2:x2-4,y2:y,stroke:"#5b6b7a","stroke-width":2,"marker-end":"url(#arrPhase)"});
+  const c=(x1+x2)/2;
+  lines.forEach((ln,i)=>txt(svg,c,y+20+i*15,ln.t,{size:ln.b?11:10,bold:ln.b,fill:ln.f||"#4a5a68"}));
+}
+
+/* =============== 数据状态（4 rank × 4 slice） =============== */
+// 每个 slice: [label, shade]  shade: 0=单rank 1=部分(2rank) 2=完整Σ
+const ST = {
+  preCopy: [
+    [["D0",0],["D0",0],["D0",0],["D0",0]],
+    [["D1",0],["D1",0],["D1",0],["D1",0]],
+    [["D2",0],["D2",0],["D2",0],["D2",0]],
+    [["D3",0],["D3",0],["D3",0],["D3",0]],
+  ],
+  rs0: [
+    [["D0+1",1],["D0",0],["D0+1",1],["D0",0]],
+    [["D1",0],["D1+2",1],["D1",0],["D1+2",1]],
+    [["D2+3",1],["D2",0],["D2+3",1],["D2",0]],
+    [["D3",0],["D3+0",1],["D3",0],["D3+0",1]],
+  ],
+  rs1: [
+    [["Σ",2],["D0",0],["D0+1",1],["D0",0]],
+    [["D1",0],["Σ",2],["D1",0],["D1+2",1]],
+    [["D2+3",1],["D2",0],["Σ",2],["D2",0]],
+    [["D3",0],["D3+0",1],["D3",0],["Σ",2]],
+  ],
+  ag0: [
+    [["Σ",2],["D0",0],["Σ",2],["D0",0]],
+    [["D1",0],["Σ",2],["D1",0],["Σ",2]],
+    [["Σ",2],["D2",0],["Σ",2],["D2",0]],
+    [["D3",0],["Σ",2],["D3",0],["Σ",2]],
+  ],
+  ag1: [
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+  ],
+};
+
+/* =============== Pipeline =============== */
+function drawPipeline(){
+  const svg=document.getElementById("pipeline");
+  defsArrows(svg);
+  const sw=46, gap=3, bh=44;
+  const cclW=sw*4+gap*3;        // 193
+  const inW=58;
+  const colGap=88;
+  // 列起始 x
+  const sx=[];
+  let x=110;
+  sx.push(x); x+=inW+colGap;            // usrIn
+  sx.push(x); x+=cclW+colGap;           // PreCopy
+  sx.push(x); x+=cclW+colGap;           // RS0
+  sx.push(x); x+=cclW+colGap;           // RS1
+  sx.push(x); x+=cclW+colGap;           // AG0
+  sx.push(x); x+=cclW+colGap;           // AG1
+  sx.push(x); x+=inW;                   // usrOut
+
+  const rowY=r=>132+r*74;
+  const titles=[
+    ["① usrIn","各 rank 完整输入 D_r（dataSize）"],
+    ["② PreCopy 后 cclBuff","usrIn 全量拷入，4 slice = D_r[si]"],
+    ["③ RS·Step0 后","Δ=1，交换 2 slice + 内联归约"],
+    ["④ RS·Step1 后","Δ=2，交换 1 slice + 内联归约"],
+    ["⑤ AG·Step0 后","Δ=2，交换 1 slice 纯拷贝"],
+    ["⑥ AG·Step1 后","Δ=1，交换 2 slice 纯拷贝"],
+    ["⑦ usrOut","PostCopy：cclBuff → usrOut = Σ"],
+  ];
+  const colW=[inW,cclW,cclW,cclW,cclW,cclW,inW];
+  titles.forEach((t,i)=>{
+    txt(svg,sx[i]+colW[i]/2,46,t[0],{bold:true,size:12.5,fill:"#2b3a48"});
+    txt(svg,sx[i]+colW[i]/2,64,t[1],{size:9.5,fill:"#8a97a3"});
+  });
+  // rank 标签
+  for(let r=0;r<4;r++) txt(svg,80,rowY(r)+bh/2+4,"rank"+r,{bold:true,size:12,fill:"#333"});
+
+  // ① usrIn：渐变块（4 浅色）
+  for(let r=0;r<4;r++)
+    gradBlock(svg,sx[0],rowY(r),inW,bh,C,"D"+r,{lsize:14});
+
+  // ②-⑥ cclBuff 状态
+  const stateKeys=["preCopy","rs0","rs1","ag0","ag1"];
+  stateKeys.forEach((key,ci)=>{
+    const st=ST[key];
+    for(let r=0;r<4;r++)
+      for(let s=0;s<4;s++){
+        const bx=sx[ci+1]+s*(sw+gap);
+        const [lab,shade]=st[r][s];
+        block(svg,bx,rowY(r),sw,bh,s,shade,lab,{lsize:10});
+        // slice 位置标签（首行上方）
+        if(r===0 && ci===0) txt(svg,bx+sw/2,rowY(0)-8,"s"+s,{size:9,fill:"#8a97a3"});
+      }
+  });
+  // slice 位置标签复用到所有 cclBuff 列
+  for(let ci=0;ci<5;ci++)
+    for(let s=0;s<4;s++)
+      txt(svg,sx[ci+1]+s*(sw+gap)+sw/2,rowY(0)-8,"s"+s,{size:9,fill:"#aab3bd"});
+
+  // ⑦ usrOut：渐变块（4 深色 Σ）
+  for(let r=0;r<4;r++)
+    gradBlock(svg,sx[6],rowY(r),inW,bh,C_DK,"Σ",{lsize:15});
+
+  // 阶段箭头
+  const bandY=452;
+  // PreCopy
+  phaseArrow(svg,sx[0]+inW+4,sx[1]-4,bandY,[
+    {t:"PreCopy",b:true,f:COPY_COLOR},
+    {t:"usrIn → cclBuff",f:COPY_COLOR},
+    {t:"LocalCopy dataSize",f:COPY_COLOR},
+  ]);
+  // RS Step0
+  phaseArrow(svg,sx[1]+cclW+4,sx[2]-4,bandY,[
+    {t:"RS·Step0 (Δ=1)",b:true,f:RS_COLOR},
+    {t:"交换 2 slice + 归约",f:RS_COLOR},
+    {t:"发/收 各 ds/2",f:RS_COLOR},
+  ]);
+  // RS Step1
+  phaseArrow(svg,sx[2]+cclW+4,sx[3]-4,bandY,[
+    {t:"RS·Step1 (Δ=2)",b:true,f:RS_COLOR},
+    {t:"交换 1 slice + 归约",f:RS_COLOR},
+    {t:"发/收 各 ds/4",f:RS_COLOR},
+  ]);
+  // AG Step0
+  phaseArrow(svg,sx[3]+cclW+4,sx[4]-4,bandY,[
+    {t:"AG·Step0 (Δ=2)",b:true,f:AG_COLOR},
+    {t:"交换 1 slice 纯拷贝",f:AG_COLOR},
+    {t:"发/收 各 ds/4",f:AG_COLOR},
+  ]);
+  // AG Step1
+  phaseArrow(svg,sx[4]+cclW+4,sx[5]-4,bandY,[
+    {t:"AG·Step1 (Δ=1)",b:true,f:AG_COLOR},
+    {t:"交换 2 slice 纯拷贝",f:AG_COLOR},
+    {t:"发/收 各 ds/2",f:AG_COLOR},
+  ]);
+  // PostCopy
+  phaseArrow(svg,sx[5]+cclW+4,sx[6]-4,bandY,[
+    {t:"PostCopy",b:true,f:COPY_COLOR},
+    {t:"cclBuff → usrOut",f:COPY_COLOR},
+    {t:"LocalCopy dataSize",f:COPY_COLOR},
+  ]);
+
+  // 底部结论标注
+  txt(svg,sx[3]+cclW/2,530,"ReduceScatter 后：每 rank 恰持 1 个切片的完整 Σ（rank r → s r）  ⇒  AllGather 后：所有 rank 持全部 4 个 Σ",
+    {size:11,fill:"#6E3B8A",bold:true});
+}
+
+/* =============== 拓扑 =============== */
+function ringNodes(cx,cy,R){ return [{x:cx-R,y:cy-R},{x:cx+R,y:cy-R},{x:cx+R,y:cy+R},{x:cx-R,y:cy+R}]; }
+function drawNode(svg,p,label,color){
+  add(svg,"circle",{cx:p.x,cy:p.y,r:24,fill:"#fff",stroke:color||NHR_COLOR,"stroke-width":2.5});
+  txt(svg,p.x,p.y+5,label,{bold:true,size:13,fill:"#333"});
+}
+function edge(svg,a,b,color,marker,label,offset=0){
+  const dx=b.x-a.x,dy=b.y-a.y,len=Math.hypot(dx,dy);
+  const nx=-dy/len,ny=dx/len;
+  const ax=a.x+nx*offset,ay=a.y+ny*offset,bx=b.x+nx*offset,by=b.y+ny*offset;
+  const ux=(bx-ax)/len,uy=(by-ay)/len,r=26;
+  add(svg,"line",{x1:ax+ux*r,y1:ay+uy*r,x2:bx-ux*r,y2:by-uy*r,stroke:color,"stroke-width":2.2,"marker-end":"url(#"+marker+")"});
+  if(label){ const mx=(ax+bx)/2+nx*11,my=(ay+by)/2+ny*11; txt(svg,mx,my+3,label,{size:10,fill:color,bold:true,mono:true}); }
+}
+function drawTopo(){
+  const svg=document.getElementById("topo");
+  defsArrows(svg);
+
+  // ----- ReduceScatter 区 -----
+  txt(svg,460,40,"ReduceScatter（通信内联归约，local += remote）",{bold:true,size:15,fill:RS_COLOR});
+  txt(svg,460,60,"每步与 1 个对端通信，距离递增 1 → 2",{size:11,fill:"#8a97a3"});
+
+  // RS Step0：环 0-1-2-3-0
+  const c1x=300,c1y=225,R=80;
+  txt(svg,c1x,95,"RS · Step0（Δ=1，环通信）",{bold:true,size:12.5,fill:RS_COLOR});
+  txt(svg,c1x,112,"每对双向交换 2 slice + 归约，各 ds/2",{size:10,fill:"#8a97a3"});
+  const N1=ringNodes(c1x,c1y,R);
+  [[0,1],[1,2],[2,3],[3,0]].forEach(([a,b])=>{
+    edge(svg,N1[a],N1[b],RS_COLOR,"arrRS","",7);
+    edge(svg,N1[b],N1[a],RS_COLOR,"arrRS","",7);
+  });
+  // 带宽标签放在环内顶部（边的下方），避免与 subtitle 重叠
+  txt(svg,c1x,c1y-R+18,"2·ds/4=ds/2",{size:9.5,fill:RS_COLOR,bold:true,mono:true});
+  for(let r=0;r<4;r++) drawNode(svg,N1[r],"r"+r,RS_COLOR);
+  txt(svg,c1x,c1y-4,"环形",{size:10,fill:"#a86a2a",bold:true});
+  txt(svg,c1x,c1y+14,"0↔1↔2↔3↔0",{size:9.5,fill:"#a86a2a"});
+
+  // RS Step1：对 0-2, 1-3
+  const c2x=620,c2y=225;
+  txt(svg,c2x,95,"RS · Step1（Δ=2，对通信）",{bold:true,size:12.5,fill:RS_COLOR});
+  txt(svg,c2x,112,"每对双向交换 1 slice + 归约，各 ds/4",{size:10,fill:"#8a97a3"});
+  const N2=ringNodes(c2x,c2y,R);
+  [[0,2],[1,3]].forEach(([a,b])=>{
+    edge(svg,N2[a],N2[b],RS_COLOR,"arrRS","ds/4",0);
+    edge(svg,N2[b],N2[a],RS_COLOR,"arrRS","",0);
+  });
+  for(let r=0;r<4;r++) drawNode(svg,N2[r],"r"+r,RS_COLOR);
+  // 对角通信的中心文字移到环下方，避免与交叉对角线重叠
+  txt(svg,c2x,c2y+R+24,"对角 0↔2  1↔3",{size:10,fill:"#a86a2a",bold:true});
+
+  // RS 结论
+  txt(svg,460,370,"ReduceScatter 结论：rank r 持有 slice r 的完整 Σr",{size:11,fill:RS_COLOR,bold:true});
+  txt(svg,460,388,"r0→Σs0  r1→Σs1  r2→Σs2  r3→Σs3（其余 slice 为原始/部分值）",{size:10,fill:"#8a97a3",mono:true});
+
+  // 分隔线
+  add(svg,"line",{x1:900,y1:85,x2:900,y2:410,stroke:"#dde2e8","stroke-width":1,"stroke-dasharray":"6 4"});
+
+  // ----- AllGather 区 -----
+  txt(svg,1350,40,"AllGather（纯拷贝覆盖，无归约）",{bold:true,size:15,fill:AG_COLOR});
+  txt(svg,1350,60,"ReduceScatter 的镜像，距离递减 2 → 1",{size:11,fill:"#8a97a3"});
+
+  // AG Step0：对 0-2, 1-3
+  const c3x=1180,c3y=225;
+  txt(svg,c3x,95,"AG · Step0（Δ=2，对通信）",{bold:true,size:12.5,fill:AG_COLOR});
+  txt(svg,c3x,112,"每对双向交换 1 slice 纯拷贝，各 ds/4",{size:10,fill:"#8a97a3"});
+  const N3=ringNodes(c3x,c3y,R);
+  [[0,2],[1,3]].forEach(([a,b])=>{
+    edge(svg,N3[a],N3[b],AG_COLOR,"arrAG","ds/4",0);
+    edge(svg,N3[b],N3[a],AG_COLOR,"arrAG","",0);
+  });
+  for(let r=0;r<4;r++) drawNode(svg,N3[r],"r"+r,AG_COLOR);
+  txt(svg,c3x,c3y+R+24,"对角 0↔2  1↔3",{size:10,fill:"#4779b8",bold:true});
+
+  // AG Step1：环 0-1-2-3-0
+  const c4x=1520,c4y=225;
+  txt(svg,c4x,95,"AG · Step1（Δ=1，环通信）",{bold:true,size:12.5,fill:AG_COLOR});
+  txt(svg,c4x,112,"每对双向交换 2 slice 纯拷贝，各 ds/2",{size:10,fill:"#8a97a3"});
+  const N4=ringNodes(c4x,c4y,R);
+  [[0,1],[1,2],[2,3],[3,0]].forEach(([a,b])=>{
+    edge(svg,N4[a],N4[b],AG_COLOR,"arrAG","",7);
+    edge(svg,N4[b],N4[a],AG_COLOR,"arrAG","",7);
+  });
+  txt(svg,c4x,c4y-R+18,"2·ds/4=ds/2",{size:9.5,fill:AG_COLOR,bold:true,mono:true});
+  for(let r=0;r<4;r++) drawNode(svg,N4[r],"r"+r,AG_COLOR);
+  txt(svg,c4x,c4y-4,"环形",{size:10,fill:"#4779b8",bold:true});
+  txt(svg,c4x,c4y+14,"0↔1↔2↔3↔0",{size:9.5,fill:"#4779b8"});
+
+  // AG 结论
+  txt(svg,1350,370,"AllGather 结论：所有 rank 持全部 4 个 Σ（完整归约结果）",{size:11,fill:AG_COLOR,bold:true});
+  txt(svg,1350,388,"cclBuff = [Σs0, Σs1, Σs2, Σs3]  →  PostCopy → usrOut",{size:10,fill:"#8a97a3",mono:true});
+
+  // 底部串行说明
+  txt(svg,900,440,"4 步串行执行（单线程，无同步）：RS·Step0 → RS·Step1 → AG·Step0 → AG·Step1",
+    {size:12,fill:NHR_COLOR,bold:true});
+  txt(svg,900,460,"单 rank 通信总量 = ds/2 + ds/4 + ds/4 + ds/2 = 1.5 × dataSize（发）+ 1.5 × dataSize（收）= 3 × dataSize",
+    {size:11,fill:"#8a97a3",mono:true});
+  txt(svg,900,482,"全网通信量 = 4 × 3 × dataSize = 12 × dataSize（与 Mesh1D Two-Shot 相同，为 One-Shot 的一半）",
+    {size:11,fill:"#8a97a3",mono:true});
+}
+
+/* =============== 图例 =============== */
+function buildLegend(id,items){
+  const box=document.getElementById(id);
+  items.forEach(it=>{
+    const d=document.createElement("div"); d.className="item";
+    if(it.line){ const l=document.createElement("span"); l.className="line"; l.style.borderTopColor=it.color; d.appendChild(l); }
+    else { const s=document.createElement("span"); s.className="sw"; s.style.background=it.color; if(it.border) s.style.border="2px solid #111"; d.appendChild(s); }
+    const t=document.createElement("span"); t.textContent=it.text; d.appendChild(t); box.appendChild(d);
+  });
+}
+
+// 执行
+drawPipeline();
+drawTopo();
+
+buildLegend("pipe_legend",[
+  {color:C[0],text:"slice0 位置（蓝）"},
+  {color:C[1],text:"slice1 位置（橙）"},
+  {color:C[2],text:"slice2 位置（绿）"},
+  {color:C[3],text:"slice3 位置（紫）"},
+  {color:C_MID[0],text:"浅 = 单 rank 原始（Dk）"},
+  {color:C_MID[2],text:"中 = 部分归约（2 rank，Da+b）"},
+  {color:C_DK[1],border:true,text:"深 = 完整 Σ（4 rank 归约）"},
+  {line:true,color:RS_COLOR,text:"ReduceScatter 通信（内联归约）"},
+  {line:true,color:AG_COLOR,text:"AllGather 通信（纯拷贝）"},
+  {line:true,color:COPY_COLOR,text:"本地拷贝（PreCopy / PostCopy）"},
+]);
+buildLegend("topo_legend",[
+  {line:true,color:RS_COLOR,text:"ReduceScatter 边（收发同时归约）"},
+  {line:true,color:AG_COLOR,text:"AllGather 边（纯拷贝覆盖）"},
+  {color:"#fff",border:true,text:"rank 节点"},
+  {color:NHR_COLOR,text:"NHR 主题色（单线程 / 零同步）"},
+]);
+
+
+/* =============== 5 Rank 颜色 =============== */
+const C5     = ["#4A90D9", "#E8943A", "#5FA855", "#9B59B6", "#26A69A"];
+const C5_MID = ["#3578B5", "#C26E18", "#3F8A35", "#7E3F9A", "#1A8A7F"];
+const C5_DK  = ["#1F5FA8", "#9E5008", "#236B22", "#5E2E78", "#0F6E64"];
+
+function sliceColor5(s, shade){
+  if(shade===1) return C5_MID[s];
+  if(shade===2) return C5_DK[s];
+  return C5[s];
+}
+function block5(svg,x,y,w,h,sliceIdx,shade,label,opt={}){
+  add(svg,"rect",{x,y,width:w,height:h,rx:4,ry:4,fill:sliceColor5(sliceIdx,shade),
+    stroke:opt.stroke||"rgba(0,0,0,0.3)","stroke-width":opt.sw||1});
+  if(label) txt(svg,x+w/2,y+h/2+4,label,{size:opt.lsize||11,bold:true,mono:true,fill:opt.textFill||"#fff"});
+}
+let gradSeq5=0;
+function gradBlock5(svg,x,y,w,h,colors,label,opt={}){
+  const defs=svg.querySelector("defs")||defsArrows(svg);
+  const id="gg5_"+(gradSeq5++);
+  const g=el("linearGradient",{id,x1:"0",y1:"0",x2:"1",y2:"0"});
+  colors.forEach((c,i)=>g.appendChild(el("stop",{offset:Math.round(i*100/(colors.length-1))+"%","stop-color":c})));
+  defs.appendChild(g);
+  add(svg,"rect",{x,y,width:w,height:h,rx:4,fill:"url(#"+id+")",stroke:opt.stroke||"#111","stroke-width":opt.sw||1.5});
+  if(label) txt(svg,x+w/2,y+h/2+5,label,{bold:true,size:opt.lsize||13,fill:opt.textFill||"#fff",mono:true});
+}
+
+/* =============== 5 Rank 数据状态 =============== */
+// [label, shade]: 0=原始 1=部分归约 2=完整Σ
+const ST5 = {
+  preCopy: [
+    [["D0",0],["D0",0],["D0",0],["D0",0],["D0",0]],
+    [["D1",0],["D1",0],["D1",0],["D1",0],["D1",0]],
+    [["D2",0],["D2",0],["D2",0],["D2",0],["D2",0]],
+    [["D3",0],["D3",0],["D3",0],["D3",0],["D3",0]],
+    [["D4",0],["D4",0],["D4",0],["D4",0],["D4",0]],
+  ],
+  rs0: [
+    [["D0+1",1],["D0",0],["D0",0],["D0+1",1],["D0",0]],
+    [["D1",0],["D1+2",1],["D1",0],["D1",0],["D1+2",1]],
+    [["D2+3",1],["D2",0],["D2+3",1],["D2",0],["D2",0]],
+    [["D3",0],["D3+4",1],["D3",0],["D3+4",1],["D3",0]],
+    [["D4",0],["D4",0],["D4+0",1],["D4",0],["D4+0",1]],
+  ],
+  rs1: [
+    [["Σp",1],["D0",0],["D0",0],["D0+1",1],["D0",0]],
+    [["D1",0],["Σp",1],["D1",0],["D1",0],["D1+2",1]],
+    [["D2+3",1],["D2",0],["Σp",1],["D2",0],["D2",0]],
+    [["D3",0],["D3+4",1],["D3",0],["Σp",1],["D3",0]],
+    [["D4",0],["D4",0],["D4+0",1],["D4",0],["Σp",1]],
+  ],
+  rs2: [
+    [["Σ",2],["D0",0],["D0",0],["D0+1",1],["D0",0]],
+    [["D1",0],["Σ",2],["D1",0],["D1",0],["D1+2",1]],
+    [["D2+3",1],["D2",0],["Σ",2],["D2",0],["D2",0]],
+    [["D3",0],["D3+4",1],["D3",0],["Σ",2],["D3",0]],
+    [["D4",0],["D4",0],["D4+0",1],["D4",0],["Σ",2]],
+  ],
+  ag0: [
+    [["Σ",2],["Σ",2],["D0",0],["D0+1",1],["D0",0]],
+    [["D1",0],["Σ",2],["Σ",2],["D1",0],["D1+2",1]],
+    [["D2+3",1],["D2",0],["Σ",2],["Σ",2],["D2",0]],
+    [["D3",0],["D3+4",1],["D3",0],["Σ",2],["Σ",2]],
+    [["Σ",2],["D4",0],["D4+0",1],["D4",0],["Σ",2]],
+  ],
+  ag1: [
+    [["Σ",2],["Σ",2],["D0",0],["Σ",2],["D0",0]],
+    [["D1",0],["Σ",2],["D1",0],["D1",0],["Σ",2]],
+    [["Σ",2],["D2",0],["Σ",2],["Σ",2],["D2",0]],
+    [["D3",0],["Σ",2],["D3",0],["Σ",2],["Σ",2]],
+    [["Σ",2],["D4",0],["Σ",2],["D4",0],["Σ",2]],
+  ],
+  ag2: [
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+    [["Σ",2],["Σ",2],["Σ",2],["Σ",2],["Σ",2]],
+  ],
+};
+
+/* =============== 5 Rank Pipeline =============== */
+function drawPipeline5(){
+  const svg=document.getElementById("pipeline5");
+  defsArrows(svg);
+  const sw=44, gap=3, bh=42;
+  const cclW=sw*5+gap*4;
+  const inW=58;
+  const colGap=80;
+  const rowH = 58;
+
+  // ===== 第一行：ReduceScatter 阶段 =====
+  const rsSx=[];
+  let rx=120;
+  rsSx.push(rx); rx+=inW+colGap;
+  rsSx.push(rx); rx+=cclW+colGap;
+  rsSx.push(rx); rx+=cclW+colGap;
+  rsSx.push(rx); rx+=cclW+colGap;
+  rsSx.push(rx); rx+=cclW;
+
+  const rowY1=r=>100+r*rowH;
+  const rsTitles=[
+    ["① usrIn","各 rank 完整输入 D_r"],
+    ["② PreCopy 后 cclBuff","usrIn 全量拷入，5 slice"],
+    ["③ RS·Step0 后","Δ=1，交换 2 slice + 内联归约"],
+    ["④ RS·Step1 后","Δ=2，交换 1 slice + 内联归约"],
+    ["⑤ RS·Step2 后","Δ=4，交换 1 slice + 内联归约"],
+  ];
+  const rsColW=[inW,cclW,cclW,cclW,cclW];
+  rsTitles.forEach((t,i)=>{
+    txt(svg,rsSx[i]+rsColW[i]/2,36,t[0],{bold:true,size:12,fill:"#2b3a48"});
+    txt(svg,rsSx[i]+rsColW[i]/2,53,t[1],{size:9.5,fill:"#8a97a3"});
+  });
+  for(let r=0;r<5;r++) txt(svg,90,rowY1(r)+bh/2+4,"rank"+r,{bold:true,size:12,fill:"#333"});
+
+  for(let r=0;r<5;r++) gradBlock5(svg,rsSx[0],rowY1(r),inW,bh,C5,"D"+r,{lsize:13});
+
+  const rsStateKeys=["preCopy","rs0","rs1","rs2"];
+  rsStateKeys.forEach((key,ci)=>{
+    const st=ST5[key];
+    for(let r=0;r<5;r++)
+      for(let s=0;s<5;s++){
+        const bx=rsSx[ci+1]+s*(sw+gap);
+        const [lab,shade]=st[r][s];
+        block5(svg,bx,rowY1(r),sw,bh,s,shade,lab,{lsize:9});
+        if(r===0) txt(svg,bx+sw/2,rowY1(0)-9,"s"+s,{size:8.5,fill:"#aab3bd"});
+      }
+  });
+
+  const bandY1=395;
+  phaseArrow(svg,rsSx[0]+inW+4,rsSx[1]-4,bandY1,[
+    {t:"PreCopy",b:true,f:COPY_COLOR},
+    {t:"usrIn → cclBuff",f:COPY_COLOR},
+  ]);
+  phaseArrow(svg,rsSx[1]+cclW+4,rsSx[2]-4,bandY1,[
+    {t:"RS·Step0 (Δ=1)",b:true,f:RS_COLOR},
+    {t:"发/收 各 2ds/5",f:RS_COLOR},
+  ]);
+  phaseArrow(svg,rsSx[2]+cclW+4,rsSx[3]-4,bandY1,[
+    {t:"RS·Step1 (Δ=2)",b:true,f:RS_COLOR},
+    {t:"发/收 各 ds/5",f:RS_COLOR},
+  ]);
+  phaseArrow(svg,rsSx[3]+cclW+4,rsSx[4]-4,bandY1,[
+    {t:"RS·Step2 (Δ=4)",b:true,f:RS_COLOR},
+    {t:"发/收 各 ds/5",f:RS_COLOR},
+  ]);
+
+  txt(svg,rsSx[2]+cclW/2,455,"ReduceScatter 完成：rank r 持 slice r 的完整 Σ（rank r → slice r）",
+    {size:11.5,fill:RS_COLOR,bold:true});
+
+  // 下行连接箭头
+  const connX=rsSx[4]+cclW/2;
+  add(svg,"line",{x1:connX,y1:475,x2:connX,y2:535,stroke:NHR_COLOR,"stroke-width":2.5,"stroke-dasharray":"6 4","marker-end":"url(#arrNhr)"});
+  txt(svg,connX+12,515,"进入 AllGather 阶段",{size:10.5,fill:NHR_COLOR,bold:true,anchor:"start"});
+
+  // ===== 第二行：AllGather 阶段 =====
+  const agSx=[];
+  let ax=120;
+  agSx.push(ax); ax+=cclW+colGap;
+  agSx.push(ax); ax+=cclW+colGap;
+  agSx.push(ax); ax+=cclW+colGap;
+  agSx.push(ax); ax+=inW;
+
+  const rowY2=r=>590+r*rowH;
+  const agTitles=[
+    ["⑥ AG·Step0 后","Δ=4，交换 1 slice 纯拷贝"],
+    ["⑦ AG·Step1 后","Δ=2，交换 1 slice 纯拷贝"],
+    ["⑧ AG·Step2 后","Δ=1，交换 2 slice 纯拷贝"],
+    ["⑨ usrOut","PostCopy：cclBuff → usrOut = Σ"],
+  ];
+  const agColW=[cclW,cclW,cclW,inW];
+  agTitles.forEach((t,i)=>{
+    txt(svg,agSx[i]+agColW[i]/2,555,t[0],{bold:true,size:12,fill:"#2b3a48"});
+    txt(svg,agSx[i]+agColW[i]/2,572,t[1],{size:9.5,fill:"#8a97a3"});
+  });
+  for(let r=0;r<5;r++) txt(svg,90,rowY2(r)+bh/2+4,"rank"+r,{bold:true,size:12,fill:"#333"});
+
+  const agStateKeys=["ag0","ag1","ag2"];
+  agStateKeys.forEach((key,ci)=>{
+    const st=ST5[key];
+    for(let r=0;r<5;r++)
+      for(let s=0;s<5;s++){
+        const bx=agSx[ci]+s*(sw+gap);
+        const [lab,shade]=st[r][s];
+        block5(svg,bx,rowY2(r),sw,bh,s,shade,lab,{lsize:9});
+        if(r===0) txt(svg,bx+sw/2,rowY2(0)-9,"s"+s,{size:8.5,fill:"#aab3bd"});
+      }
+  });
+
+  for(let r=0;r<5;r++) gradBlock5(svg,agSx[3],rowY2(r),inW,bh,C5_DK,"Σ",{lsize:14});
+
+  const bandY2=900;
+  phaseArrow(svg,agSx[0]+cclW+4,agSx[1]-4,bandY2,[
+    {t:"AG·Step0 (Δ=4)",b:true,f:AG_COLOR},
+    {t:"发/收 各 ds/5",f:AG_COLOR},
+  ]);
+  phaseArrow(svg,agSx[1]+cclW+4,agSx[2]-4,bandY2,[
+    {t:"AG·Step1 (Δ=2)",b:true,f:AG_COLOR},
+    {t:"发/收 各 ds/5",f:AG_COLOR},
+  ]);
+  phaseArrow(svg,agSx[2]+cclW+4,agSx[3]-4,bandY2,[
+    {t:"PostCopy",b:true,f:COPY_COLOR},
+    {t:"cclBuff → usrOut",f:COPY_COLOR},
+  ]);
+
+  txt(svg,agSx[1]+cclW/2,955,"AllGather 完成：所有 rank 持全部 5 个切片的完整 Σ → PostCopy 输出 usrOut",
+    {size:11.5,fill:AG_COLOR,bold:true});
+}
+
+/* =============== 5 Rank Topology =============== */
+function ringNodes5(cx,cy,R){
+  const nodes=[];
+  for(let i=0;i<5;i++){
+    const angle = -Math.PI/2 + i*2*Math.PI/5;
+    nodes.push({x:cx+R*Math.cos(angle), y:cy+R*Math.sin(angle)});
+  }
+  return nodes;
+}
+
+function drawTopo5(){
+  const svg=document.getElementById("topo5");
+  defsArrows(svg);
+  const R=78;
+
+  txt(svg,540,36,"ReduceScatter（通信内联归约：local += remote）—— 5 Rank",{bold:true,size:15,fill:RS_COLOR});
+  txt(svg,540,56,"距离递增 1 → 2 → 4，共 3 步",{size:11,fill:"#8a97a3"});
+
+  // RS Step0: 环
+  const c1x=280,c1y=230;
+  txt(svg,c1x,90,"RS · Step0（Δ=1，环）",{bold:true,size:12,fill:RS_COLOR});
+  txt(svg,c1x,106,"双向交换 2 slice + 归约",{size:9.5,fill:"#8a97a3"});
+  const N1=ringNodes5(c1x,c1y,R);
+  [[0,1],[1,2],[2,3],[3,4],[4,0]].forEach(([a,b])=>{
+    edge(svg,N1[a],N1[b],RS_COLOR,"arrRS","",6);
+    edge(svg,N1[b],N1[a],RS_COLOR,"arrRS","",6);
+  });
+  for(let r=0;r<5;r++) drawNode(svg,N1[r],"r"+r,RS_COLOR);
+  txt(svg,c1x,c1y-2,"环形",{size:9.5,fill:"#a86a2a",bold:true});
+  txt(svg,c1x,c1y+12,"2×ds/5",{size:9,fill:RS_COLOR,bold:true,mono:true});
+
+  // RS Step1: Δ=2 五角星
+  const c2x=540,c2y=230;
+  txt(svg,c2x,90,"RS · Step1（Δ=2，五角星）",{bold:true,size:12,fill:RS_COLOR});
+  txt(svg,c2x,106,"双向交换 1 slice + 归约",{size:9.5,fill:"#8a97a3"});
+  const N2=ringNodes5(c2x,c2y,R);
+  [[0,2],[2,4],[4,1],[1,3],[3,0]].forEach(([a,b])=>{
+    edge(svg,N2[a],N2[b],RS_COLOR,"arrRS","ds/5",0);
+  });
+  for(let r=0;r<5;r++) drawNode(svg,N2[r],"r"+r,RS_COLOR);
+  txt(svg,c2x,c1y+R+28,"0→2→4→1→3→0",{size:9,fill:"#a86a2a",bold:true});
+
+  // RS Step2: Δ=4 逆环
+  const c3x=800,c3y=230;
+  txt(svg,c3x,90,"RS · Step2（Δ=4，逆环）",{bold:true,size:12,fill:RS_COLOR});
+  txt(svg,c3x,106,"补齐最后 1 rank → 完整 Σ",{size:9.5,fill:"#8a97a3"});
+  const N3=ringNodes5(c3x,c3y,R);
+  [[0,4],[1,0],[2,1],[3,2],[4,3]].forEach(([a,b])=>{
+    edge(svg,N3[a],N3[b],RS_COLOR,"arrRS","ds/5",6);
+  });
+  for(let r=0;r<5;r++) drawNode(svg,N3[r],"r"+r,RS_COLOR);
+  txt(svg,c3x,c1y-2,"逆环",{size:9.5,fill:"#a86a2a",bold:true});
+  txt(svg,c3x,c1y+12,"ds/5",{size:9,fill:RS_COLOR,bold:true,mono:true});
+
+  txt(svg,540,380,"ReduceScatter 结论：rank r 持有 slice r 的完整 Σr",{size:11,fill:RS_COLOR,bold:true});
+  txt(svg,540,398,"r0→s0  r1→s1  r2→s2  r3→s3  r4→s4",{size:10,fill:"#8a97a3",mono:true});
+
+  // 分隔线
+  add(svg,"line",{x1:1040,y1:80,x2:1040,y2:440,stroke:"#dde2e8","stroke-width":1,"stroke-dasharray":"6 4"});
+
+  // AllGather
+  txt(svg,1540,36,"AllGather（纯拷贝覆盖，无归约）—— 5 Rank",{bold:true,size:15,fill:AG_COLOR});
+  txt(svg,1540,56,"RS 的镜像，距离递减 4 → 2 → 1",{size:11,fill:"#8a97a3"});
+
+  // AG Step0: Δ=4 逆环
+  const c4x=1280,c4y=230;
+  txt(svg,c4x,90,"AG · Step0（Δ=4，逆环）",{bold:true,size:12,fill:AG_COLOR});
+  txt(svg,c4x,106,"双向交换 1 slice 拷贝",{size:9.5,fill:"#8a97a3"});
+  const N4=ringNodes5(c4x,c4y,R);
+  [[0,4],[1,0],[2,1],[3,2],[4,3]].forEach(([a,b])=>{
+    edge(svg,N4[a],N4[b],AG_COLOR,"arrAG","ds/5",6);
+  });
+  for(let r=0;r<5;r++) drawNode(svg,N4[r],"r"+r,AG_COLOR);
+  txt(svg,c4x,c1y-2,"逆环",{size:9.5,fill:"#4779b8",bold:true});
+
+  // AG Step1: Δ=2 五角星
+  const c5x=1540,c5y=230;
+  txt(svg,c5x,90,"AG · Step1（Δ=2，五角星）",{bold:true,size:12,fill:AG_COLOR});
+  txt(svg,c5x,106,"双向交换 1 slice 拷贝",{size:9.5,fill:"#8a97a3"});
+  const N5=ringNodes5(c5x,c5y,R);
+  [[0,2],[2,4],[4,1],[1,3],[3,0]].forEach(([a,b])=>{
+    edge(svg,N5[a],N5[b],AG_COLOR,"arrAG","ds/5",0);
+  });
+  for(let r=0;r<5;r++) drawNode(svg,N5[r],"r"+r,AG_COLOR);
+  txt(svg,c5x,c1y+R+28,"0→2→4→1→3→0",{size:9,fill:"#4779b8",bold:true});
+
+  // AG Step2: Δ=1 环
+  const c6x=1800,c6y=230;
+  txt(svg,c6x,90,"AG · Step2（Δ=1，环）",{bold:true,size:12,fill:AG_COLOR});
+  txt(svg,c6x,106,"双向交换 2 slice 拷贝",{size:9.5,fill:"#8a97a3"});
+  const N6=ringNodes5(c6x,c6y,R);
+  [[0,1],[1,2],[2,3],[3,4],[4,0]].forEach(([a,b])=>{
+    edge(svg,N6[a],N6[b],AG_COLOR,"arrAG","",6);
+    edge(svg,N6[b],N6[a],AG_COLOR,"arrAG","",6);
+  });
+  for(let r=0;r<5;r++) drawNode(svg,N6[r],"r"+r,AG_COLOR);
+  txt(svg,c6x,c1y-2,"环形",{size:9.5,fill:"#4779b8",bold:true});
+  txt(svg,c6x,c1y+12,"2×ds/5",{size:9,fill:AG_COLOR,bold:true,mono:true});
+
+  txt(svg,1540,380,"AllGather 结论：所有 rank 持全部 5 个 Σ（完整归约结果）",{size:11,fill:AG_COLOR,bold:true});
+  txt(svg,1540,398,"cclBuff = [Σs0, Σs1, Σs2, Σs3, Σs4]  → PostCopy → usrOut",{size:10,fill:"#8a97a3",mono:true});
+
+  // 底部说明
+  txt(svg,1040,520,"6 步串行执行（单线程，无同步）：RS·S0 → RS·S1 → RS·S2 → AG·S0 → AG·S1 → AG·S2",
+    {size:12,fill:NHR_COLOR,bold:true});
+  txt(svg,1040,540,"单 rank 通信总量 = 2ds/5 + ds/5 + ds/5 + ds/5 + ds/5 + 2ds/5 = 1.6 × dataSize（发） + 1.6 × dataSize（收） = 3.2 × dataSize",
+    {size:11,fill:"#8a97a3",mono:true});
+  txt(svg,1040,562,"全网通信量 = 5 × 3.2 × dataSize = 16 × dataSize",
+    {size:11,fill:"#8a97a3",mono:true});
+  txt(svg,1040,590,"非 2 次幂特性：N=5 时步数 = ⌈log₂N⌉ = 3，Step2（Δ=4）为「补齐步」，将最后 1 个 rank 并入归约 / 扩散",
+    {size:10.5,fill:"#6E3B8A",bold:true});
+}
+
+// 执行 5 Rank
+drawPipeline5();
+drawTopo5();
+
+buildLegend("pipe5_legend",[
+  {color:C5[0],text:"slice0 位置（蓝）"},
+  {color:C5[1],text:"slice1 位置（橙）"},
+  {color:C5[2],text:"slice2 位置（绿）"},
+  {color:C5[3],text:"slice3 位置（紫）"},
+  {color:C5[4],text:"slice4 位置（青）"},
+  {color:C5_MID[0],text:"浅 = 单 rank 原始（Dk）"},
+  {color:C5_MID[2],text:"中 = 部分归约（2~4 rank）"},
+  {color:C5_DK[1],border:true,text:"深 = 完整 Σ（5 rank 归约）"},
+  {line:true,color:RS_COLOR,text:"ReduceScatter 通信（内联归约）"},
+  {line:true,color:AG_COLOR,text:"AllGather 通信（纯拷贝）"},
+  {line:true,color:COPY_COLOR,text:"本地拷贝（PreCopy / PostCopy）"},
+]);
+buildLegend("topo5_legend",[
+  {line:true,color:RS_COLOR,text:"ReduceScatter 边（收发同时归约）"},
+  {line:true,color:AG_COLOR,text:"AllGather 边（纯拷贝覆盖）"},
+  {color:"#fff",border:true,text:"rank 节点"},
+  {color:NHR_COLOR,text:"NHR 通用兜底（支持非 2 次幂）"},
+]);
+
+</script>
+
+  
+  <!-- ===== 数据切分与性能对比分析 ===== -->
+  
+  <style>
+    .analysis-card {
+      background: #fff;
+      border: 1px solid #e3e6ea;
+      border-radius: 10px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.04);
+      margin: 0 auto 34px;
+      max-width: 1660px;
+      padding: 18px 22px 26px;
+    }
+    .analysis-card h2 {
+      font-size: 18px;
+      margin: 4px 0 12px;
+      border-left: 5px solid #7c3aed;
+      padding-left: 10px;
+      color: #1a1a2e;
+    }
+    .analysis-card h3 {
+      font-size: 15px;
+      font-weight: 700;
+      color: #2b3a48;
+      margin: 20px 0 8px;
+      padding-left: 12px;
+      border-left: 3px solid #7c3aed;
+    }
+    .analysis-card .scene-box {
+      background: #f5f3ff;
+      border: 1px solid #ddd6fe;
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      line-height: 1.8;
+      color: #4c1d95;
+    }
+    .analysis-card .scene-box b { color: #5b21b6; }
+    .analysis-card table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12.5px;
+      margin: 10px 0 16px;
+    }
+    .analysis-card th, .analysis-card td {
+      border: 1px solid #dde2e8;
+      padding: 8px 10px;
+      text-align: center;
+      line-height: 1.6;
+    }
+    .analysis-card th {
+      background: #eef2ff;
+      color: #1e1b4b;
+      font-weight: 600;
+    }
+    .analysis-card td.k {
+      background: #f7f9fb;
+      font-weight: 600;
+      text-align: left;
+      color: #374151;
+    }
+    .analysis-card td.highlight {
+      background: #fef3c7;
+      font-weight: 700;
+      color: #92400e;
+    }
+    .analysis-card .formula {
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 12.5px;
+      color: #0f172a;
+      margin: 8px 0 12px;
+      line-height: 1.7;
+    }
+    .analysis-card .note-box {
+      background: #fefce8;
+      border: 1px solid #fde68a;
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12.5px;
+      color: #854d0e;
+      margin: 10px 0;
+      line-height: 1.7;
+    }
+    .analysis-card .notify-card {
+      background: #f0fdf4;
+      border: 1px solid #bbf7d0;
+      border-radius: 8px;
+      padding: 14px 18px;
+      margin: 12px 0;
+    }
+    .analysis-card .notify-card h4 {
+      font-size: 14px;
+      color: #166534;
+      margin: 0 0 8px;
+    }
+    .analysis-card .timeline {
+      position: relative;
+      padding-left: 24px;
+      margin: 12px 0;
+    }
+    .analysis-card .timeline::before {
+      content: '';
+      position: absolute;
+      left: 8px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #86efac;
+    }
+    .analysis-card .timeline-item {
+      position: relative;
+      margin-bottom: 14px;
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+    .analysis-card .timeline-item::before {
+      content: '';
+      position: absolute;
+      left: -20px;
+      top: 6px;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #22c55e;
+      border: 2px solid #fff;
+    }
+    .analysis-card .timeline-item .step-tag {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-right: 6px;
+    }
+    .tag-main2sub { background: #dbeafe; color: #1e40af; }
+    .tag-sub2main { background: #fce7f3; color: #9d174d; }
+    .tag-exec { background: #f3f4f6; color: #374151; }
+  </style>
+
+  <div class="analysis-card">
+    <h2>数据切分与性能对比分析</h2>
+    
+    <div class="scene-box">
+      <b>假设场景</b>：rankSize = <b>5</b>（非 2^i），dataType = <b>u64</b>（8 字节），dataSize = <b>34.125 MB</b>（dataCount = 4,472,832），hcclBuff.size = <b>4 MB</b>，HCCL_MIN_SLICE_ALIGN = 128 字节。<br>
+      <b>关键公式</b>：<code>maxDataSizePerLoop = min(hcclBuff.size, hcclBuff.size / mult / 128 × 128)</code>，<code>loopTimes = ⌈dataCount / maxDataCountPerLoop⌉</code>。
+    </div>
+
+
+    <h3>1. 循环次数与末轮数据</h3>
+    <div class="formula">
+      mult = <b>1</b> &nbsp;|&nbsp;
+      scratchBoundDataSize = 4194304 / 1 / 128 × 128 = <b>4,194,304</b> 字节 &nbsp;|&nbsp;
+      maxDataCountPerLoop = <b>524,288</b><br>
+      loopTimes = ⌈4472832 / 524,288⌉ = <b>9</b> &nbsp;|&nbsp;
+      末轮 currDataCount = 4472832 - 8 × 524,288 = <b>278,528</b> &nbsp;|&nbsp;
+      currDataSize = <b>2,228,224</b> 字节
+    </div>
+
+    <h3>2. 末轮数据切分（按数据维 1 级切分）</h3>
+    <div style="font-size:13px;color:#374151;margin-bottom:10px;line-height:1.7;">按数据维均分为 N=5 段 slice（RoundUp 取整）。sliceCount = RoundUp(278528, 5) = 55706。N=5 时 NHR 步数 = bit_width(4) = 3，RS 3步 + AG 3步 = 6步。</div>
+    
+      <div class="formula">sliceCount = ⌈278528 / 5⌉ = 55,706 &nbsp;&nbsp; sliceSize = 55706 × 8 = 445,648 字节</div>
+      <table>
+        <thead><tr><th>slice</th><th>offset (字节)</th><th>count (元素)</th><th>size (字节)</th><th>说明</th></tr></thead>
+        <tbody>
+          <tr><td>slice 0-3</td><td>0 / 445648 / 891296 / 1336944</td><td>55,706 (各)</td><td>445,648 (各)</td><td>前 4 段等大</td></tr>
+          <tr class="highlight"><td>slice 4</td><td>1,782,592</td><td><b>55,704</b></td><td><b>445,632</b></td><td>末段余量 (278528 - 4×55706 = 55704)</td></tr>
+          <tr class="highlight"><td><b>合计</b></td><td>—</td><td><b>278,528</b></td><td><b>2,228,224</b></td><td>5 段<b>非均衡</b>切分</td></tr>
+        </tbody>
+      </table>
+      <h3>RS 通信表（myRankIdx=1，N=5，3 步）</h3>
+      <table>
+        <thead><tr><th>RS 步骤</th><th>Δ</th><th>toRank</th><th>fromRank</th><th>nSlices</th><th>txSliceIdxs</th><th>rxSliceIdxs</th><th>tx 通信量</th><th>rx 通信量</th></tr></thead>
+        <tbody>
+          <tr><td>step 0</td><td>1</td><td>0</td><td>2</td><td>2</td><td>[0, 3]</td><td>[1, 4]</td><td>445648+445648 = 891,296</td><td>445648+445632 = 891,280</td></tr>
+          <tr><td>step 1</td><td>2</td><td>4</td><td>3</td><td>1</td><td>[4]</td><td>[1]</td><td>445,632</td><td>445,648</td></tr>
+          <tr><td>step 2</td><td>4</td><td>2</td><td>0</td><td>1</td><td>[2]</td><td>[1]</td><td>445,648</td><td>445,648</td></tr>
+          <tr class="highlight"><td><b>合计</b></td><td>—</td><td>—</td><td>—</td><td><b>4</b></td><td>—</td><td>—</td><td><b>1,782,576</b></td><td><b>1,782,576</b></td></tr>
+        </tbody>
+      </table>
+    <div class="note-box"><b>分析：</b>因 slice 4（445632 B）比其余（445648 B）少 16 字节，step 0/1 的 tx/rx 通信量略有差异（差 16 B），但总收发量相等。u64 为特殊数据类型，DMA 内联归约不支持，实际选择器不会为 u64 选 NHR。</div>
+
+    
+      <h3>3. 性能对比（rank=4 与 rank=2^i 合并）</h3>
+      <table>
+        <thead><tr><th style="width:22%">维度</th><th>rank = 4</th><th>rank = 2^i（N ≥ 2）</th></tr></thead>
+        <tbody><tr><td class="k">算法结构</td><td>RS + AG</td><td>RS + AG</td></tr><tr><td class="k">数据切分</td><td>1级（4段）</td><td>1级（N段）</td></tr><tr><td class="k">线程数</td><td>1</td><td>1</td></tr><tr><td class="k">同步次数</td><td>0</td><td>0</td></tr><tr><td class="k">cclBuff 倍率</td><td class="highlight">1×</td><td class="highlight">1×</td></tr><tr><td class="k">单 rank 发送量</td><td>1.5 × ds</td><td>2(N-1)/N·ds</td></tr><tr><td class="k">单 rank 接收量</td><td>1.5 × ds</td><td>2(N-1)/N·ds</td></tr><tr><td class="k">单 rank 通信总量</td><td class="highlight">3 × ds</td><td class="highlight">4(N-1)/N·ds</td></tr><tr><td class="k">LocalCopy 数据量</td><td>2 × ds</td><td>2·ds</td></tr><tr><td class="k">Reduce 方式</td><td>通信内联归约</td><td>通信内联归约</td></tr><tr><td class="k">Reduce 数据量</td><td>重叠(0.75ds)</td><td>重叠((N-1)/N·ds)</td></tr><tr><td class="k">通信步数</td><td>4 (串行)</td><td>2log₂N (串行)</td></tr><tr><td class="k">通信并行度</td><td>1路</td><td>1路</td></tr></tbody>
+      </table>
+
+    <h3>4. 关键结论</h3>
+    <div style="font-size:13px;color:#374151;line-height:1.9;padding-left:8px;">
+      <div>• <b>cclBuff 倍率 = 1×</b>：连续分区+内联归约，最省内存</div>
+      <div>• <b>loop 次数 = 9</b>：倍率越大，单轮处理数据越小，循环次数越多</div>
+      <div>• <b>五模板横向对比</b>：详见独立文档 <code>A00-模板综合对比.html</code></div>
+      <div>• <b>适用场景</b>：连续分区+内联归约，cclBuff 最省（1×）；单线程零同步，但串行执行无并行度。适合任意拓扑、非特殊数据类型，通用兜底。</div>
+    </div>
+  </div>
+
+</body>
+</html>

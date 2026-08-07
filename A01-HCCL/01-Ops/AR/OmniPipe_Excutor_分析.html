@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>HCCL AllReduce OmniPipe Executor 数据传输过程</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; background: #f0f2f5; color: #1a1a2e; padding: 24px; }
+h1 { font-size: 22px; color: #1a1a2e; margin-bottom: 6px; text-align: center; }
+.subtitle { text-align: center; color: #666; font-size: 13px; margin-bottom: 20px; }
+.card { background: #fff; border-radius: 10px; padding: 18px 22px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
+.card h2 { font-size: 16px; color: #1a1a2e; margin-bottom: 14px; padding-bottom: 8px; border-bottom: 2px solid #e8e8f0; }
+.card h3 { font-size: 14px; color: #333; margin: 12px 0 8px 0; }
+
+/* 拓扑结构 */
+.topo-grid { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+.pod { border: 2px solid #8b5cf6; border-radius: 8px; padding: 10px; background: #f5f3ff; }
+.pod-title { text-align: center; font-weight: 700; color: #6d28d9; font-size: 13px; margin-bottom: 8px; }
+.server-row { display: flex; gap: 6px; margin-bottom: 4px; }
+.server { border: 1px solid #a78bfa; border-radius: 4px; padding: 4px; background: #fff; }
+.server-name { font-size: 10px; color: #7c3aed; text-align: center; margin-bottom: 2px; }
+.rank-cell { width: 18px; height: 18px; background: #ede9fe; border-radius: 3px; display: inline-flex; align-items: center; justify-content: center; font-size: 9px; color: #5b21b6; margin: 1px; }
+.rank-cell.highlight { background: #8b5cf6; color: #fff; font-weight: 700; }
+
+/* 模板分配表 */
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { border: 1px solid #e0e0e8; padding: 6px 10px; text-align: left; }
+th { background: #f5f3ff; color: #5b21b6; font-weight: 600; }
+tr:nth-child(even) { background: #fafafa; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.tag-l0 { background: #dbeafe; color: #1d4ed8; }
+.tag-l1 { background: #fce7f3; color: #be185d; }
+.tag-l2 { background: #d1fae5; color: #047857; }
+.tag-aicpu { background: #fef3c7; color: #92400e; }
+.tag-dpu { background: #e0e7ff; color: #3730a3; }
+
+/* 流水线时序 */
+.timeline { position: relative; padding: 10px 0; }
+.tl-row { display: flex; align-items: center; margin-bottom: 6px; }
+.tl-label { width: 90px; font-size: 12px; font-weight: 600; color: #333; text-align: right; padding-right: 10px; }
+.tl-bar-wrap { flex: 1; position: relative; height: 28px; background: #f5f5f5; border-radius: 4px; }
+.tl-bar { position: absolute; height: 24px; top: 2px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; font-weight: 600; }
+.bar-rs-l0 { background: #3b82f6; }
+.bar-rs-l1 { background: #ec4899; }
+.bar-rs-l2 { background: #10b981; }
+.bar-ag-l0 { background: #6366f1; }
+.bar-ag-l1 { background: #f43f5e; }
+.bar-ag-l2 { background: #14b8a6; }
+.sync-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: #ef4444; opacity: 0.6; }
+.sync-label { position: absolute; top: -16px; font-size: 9px; color: #ef4444; transform: translateX(-50%); }
+
+/* 数据量沙漏 */
+.hourglass { display: flex; flex-direction: column; align-items: stretch; gap: 4px; padding: 10px; }
+.hg-row { display: flex; align-items: center; gap: 10px; }
+.hg-label { width: 100px; font-size: 12px; text-align: right; color: #555; }
+.hg-bar { height: 22px; background: linear-gradient(90deg, #8b5cf6, #a78bfa); border-radius: 4px; display: flex; align-items: center; padding-left: 8px; color: #fff; font-size: 11px; font-weight: 600; transition: width 0.3s; }
+.hg-bar.rs { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+.hg-bar.ag { background: linear-gradient(90deg, #10b981, #34d399); }
+.hg-bar.copy { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+
+/* 通信量对比 */
+.comm-bars { display: flex; flex-direction: column; gap: 8px; }
+.comm-row { display: flex; align-items: center; gap: 8px; }
+.comm-name { width: 120px; font-size: 12px; text-align: right; }
+.comm-bar { height: 100%; border-radius: 4px; display: flex; align-items: center; padding-left: 8px; color: #fff; font-size: 11px; font-weight: 600; }
+
+/* 对比框 */
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.compare-box { border: 1px solid #e0e0e8; border-radius: 8px; padding: 14px; }
+.compare-box h4 { font-size: 13px; margin-bottom: 8px; color: #333; }
+.compare-box.trad { border-color: #fca5a5; background: #fef2f2; }
+.compare-box.omni { border-color: #86efac; background: #f0fdf4; }
+
+/* 代码块 */
+.code-block { background: #1e1e2e; color: #cdd6f4; padding: 14px; border-radius: 6px; font-family: "Consolas", "Monaco", monospace; font-size: 12px; line-height: 1.6; overflow-x: auto; }
+.code-block .comment { color: #6c7086; }
+.code-block .keyword { color: #cba6f7; }
+.code-block .func { color: #89b4fa; }
+
+/* 流程箭头 */
+.flow { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 4px; margin: 10px 0; }
+.flow-step { padding: 6px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; color: #fff; }
+.flow-arrow { color: #999; font-size: 16px; }
+
+/* ===== 增强版时序图 ===== */
+.gantt-container { position: relative; padding: 0; }
+.gantt-header { display: flex; margin-bottom: 4px; }
+.gantt-header-label { width: 110px; flex-shrink: 0; }
+.gantt-timeline { flex: 1; position: relative; height: 32px; border-bottom: 2px solid #333; }
+.gantt-tick { position: absolute; top: 0; bottom: 0; width: 1px; background: #ccc; }
+.gantt-tick-label { position: absolute; top: 2px; font-size: 10px; color: #666; transform: translateX(-50%); font-weight: 600; }
+.gantt-phase { position: absolute; top: 14px; height: 16px; border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; font-weight: 700; }
+.phase-rs { background: linear-gradient(90deg, #dbeafe, #93c5fd); color: #1e40af; }
+.phase-ag { background: linear-gradient(90deg, #d1fae5, #6ee7b7); color: #065f46; }
+.phase-copy { background: linear-gradient(90deg, #fef3c7, #fcd34d); color: #92400e; }
+
+.gantt-row { display: flex; align-items: center; margin-bottom: 3px; min-height: 30px; }
+.gantt-row-label { width: 110px; flex-shrink: 0; font-size: 12px; font-weight: 600; color: #333; text-align: right; padding-right: 10px; }
+.gantt-row-bars { flex: 1; position: relative; height: 28px; background: #fafafa; border-radius: 4px; border: 1px solid #eee; }
+.gantt-bar { position: absolute; height: 24px; top: 1px; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 10px; color: #fff; font-weight: 600; overflow: hidden; white-space: nowrap; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+.gantt-bar .bar-text { padding: 0 4px; }
+.gantt-bar.narrow { justify-content: flex-start; }
+.gantt-bar.narrow .bar-text-ext { position: absolute; left: 100%; margin-left: 4px; color: #333; font-size: 10px; white-space: nowrap; }
+
+.gantt-sync { position: absolute; top: 0; bottom: 0; width: 1px; border-left: 2px dashed #ef4444; z-index: 5; }
+.gantt-sync-label { position: absolute; top: -1px; font-size: 9px; color: #ef4444; font-weight: 700; background: #fff; padding: 0 2px; transform: translateX(-50%); z-index: 6; }
+
+.gantt-legend { display: flex; gap: 16px; justify-content: center; margin-top: 12px; flex-wrap: wrap; }
+.gantt-legend-item { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #555; }
+.gantt-legend-color { width: 16px; height: 12px; border-radius: 2px; }
+.gantt-legend-sync { width: 12px; height: 12px; border-left: 2px dashed #ef4444; }
+
+
+/* 窄 bar 外部文字标签 */
+.hg-bar-wrap { display: flex; align-items: center; }
+.hg-bar-ext { margin-left: 8px; font-size: 11px; color: #333; font-weight: 600; white-space: nowrap; }
+.comm-bar-wrap { flex: 1; height: 24px; background: #f0f0f0; border-radius: 4px; display: flex; align-items: center; overflow: hidden; }
+.comm-bar-ext { margin-left: 8px; font-size: 11px; color: #333; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+
+/* 并行组（上下堆叠） */
+.parallel-group { display: inline-flex; flex-direction: column; gap: 3px; align-items: stretch; }
+.parallel-group .flow-step { text-align: center; }
+.parallel-brace { display: inline-flex; align-items: center; font-size: 20px; color: #10b981; font-weight: 700; padding: 0 2px; }
+.parallel-label { font-size: 10px; color: #10b981; font-weight: 700; text-align: center; margin-top: 2px; }
+
+</style>
+</head>
+<body>
+
+
+<h1>HCCL AllReduce OmniPipe Executor 数据传输过程</h1>
+<div class="subtitle">8×8×4 三级拓扑（256 rank）· 6 模板流水线调度 · L0+L1 并行，L2 外层循环</div>
+
+<!-- 拓扑结构 -->
+<div class="card">
+<h2>1. 三级拓扑结构（8×8×4 = 256 rank）</h2>
+<div class="topo-grid">
+  <div class="pod">
+    <div class="pod-title">Pod 0 (Level2)</div>
+    <div class="server-row">
+      <div class="server"><div class="server-name">S0</div><span class="rank-cell">0</span><span class="rank-cell">1</span><span class="rank-cell">2</span><span class="rank-cell">3</span><span class="rank-cell">4</span><span class="rank-cell">5</span><span class="rank-cell">6</span><span class="rank-cell">7</span></div>
+      <div class="server"><div class="server-name">S1</div><span class="rank-cell">8</span><span class="rank-cell">9</span><span class="rank-cell">10</span><span class="rank-cell">11</span><span class="rank-cell">12</span><span class="rank-cell">13</span><span class="rank-cell">14</span><span class="rank-cell">15</span></div>
+    </div>
+    <div class="server-row">
+      <div class="server"><div class="server-name">S2</div><span class="rank-cell">16</span><span class="rank-cell">17</span><span class="rank-cell">18</span><span class="rank-cell">19</span><span class="rank-cell">20</span><span class="rank-cell">21</span><span class="rank-cell">22</span><span class="rank-cell">23</span></div>
+      <div class="server"><div class="server-name">S3</div><span class="rank-cell">24</span><span class="rank-cell">25</span><span class="rank-cell">26</span><span class="rank-cell">27</span><span class="rank-cell">28</span><span class="rank-cell">29</span><span class="rank-cell">30</span><span class="rank-cell">31</span></div>
+    </div>
+    <div style="text-align:center; font-size:10px; color:#888; margin-top:4px;">... 共 8 Server × 8 rank = 64</div>
+  </div>
+  <div class="pod">
+    <div class="pod-title">Pod 1 (Level2)</div>
+    <div class="server-row">
+      <div class="server"><div class="server-name">S0</div><span class="rank-cell">64</span><span class="rank-cell">65</span><span class="rank-cell">66</span><span class="rank-cell">67</span><span class="rank-cell">68</span><span class="rank-cell">69</span><span class="rank-cell">70</span><span class="rank-cell">71</span></div>
+      <div class="server"><div class="server-name">S1</div><span class="rank-cell">72</span><span class="rank-cell">73</span><span class="rank-cell">74</span><span class="rank-cell">75</span><span class="rank-cell">76</span><span class="rank-cell">77</span><span class="rank-cell">78</span><span class="rank-cell">79</span></div>
+    </div>
+    <div class="server-row">
+      <div class="server"><div class="server-name">S2</div><span class="rank-cell">80</span><span class="rank-cell">81</span><span class="rank-cell">82</span><span class="rank-cell">83</span><span class="rank-cell">84</span><span class="rank-cell">85</span><span class="rank-cell">86</span><span class="rank-cell">87</span></div>
+      <div class="server"><div class="server-name">S3</div><span class="rank-cell">88</span><span class="rank-cell">89</span><span class="rank-cell">90</span><span class="rank-cell">91</span><span class="rank-cell">92</span><span class="rank-cell">93</span><span class="rank-cell">94</span><span class="rank-cell">95</span></div>
+    </div>
+    <div style="text-align:center; font-size:10px; color:#888; margin-top:4px;">... 共 8 Server × 8 rank = 64</div>
+  </div>
+  <div class="pod">
+    <div class="pod-title">Pod 2 (Level2)</div>
+    <div style="text-align:center; padding:20px; color:#888; font-size:12px;">64 rank<br>(rank 128-191)</div>
+  </div>
+  <div class="pod">
+    <div class="pod-title">Pod 3 (Level2)</div>
+    <div style="text-align:center; padding:20px; color:#888; font-size:12px;">64 rank<br>(rank 192-255)</div>
+  </div>
+</div>
+<div style="margin-top:12px; font-size:12px; color:#555; text-align:center;">
+  <span class="tag tag-l0">Level0 (X)</span> 框内 8 rank · Mesh1D · AICPU &nbsp;&nbsp;
+  <span class="tag tag-l1">Level1 (Y)</span> 框间 8 rank · NHR · AICPU &nbsp;&nbsp;
+  <span class="tag tag-l2">Level2 (Z)</span> 跨 Pod 4 rank · DPU
+</div>
+</div>
+
+<!-- 模板分配 -->
+<div class="card">
+<h2>2. 六模板分配（line954-958 REGISTER_EXEC_V2_MULTI）</h2>
+<table>
+<tr><th>层级</th><th>RS 模板</th><th>AG 模板</th><th>执行单元</th><th>通信范围</th><th>并行度</th></tr>
+<tr><td><span class="tag tag-l0">Level0 (X)</span></td><td>InsTempReduceScatterOmniPipeMesh1D</td><td>InsTempAllGatherOmniPipeMesh1D</td><td><span class="tag tag-aicpu">AICPU</span></td><td>框内 8 rank</td><td>7 路并行</td></tr>
+<tr><td><span class="tag tag-l1">Level1 (Y)</span></td><td>InsTempReduceScatterOmniPipeNHR</td><td>InsTempAllGatherOmniPipeNHR</td><td><span class="tag tag-aicpu">AICPU</span></td><td>框间 8 rank</td><td>1 路串行 (NHR)</td></tr>
+<tr><td><span class="tag tag-l2">Level2 (Z)</span></td><td>InsTempReduceScatterOmniPipeMesh1dDpu</td><td>InsTempAllGatherOmniPipeNHRDPU</td><td><span class="tag tag-dpu">DPU</span></td><td>跨 Pod 4 rank</td><td>3 路 / 1 路</td></tr>
+</table>
+</div>
+
+<!-- OmniPipe 流水线核心 -->
+<div class="card">
+<h2>3. OmniPipe 流水线调度核心</h2>
+
+<div class="compare-grid">
+  <div class="compare-box trad">
+    <h4>传统分层（串行 6 步）</h4>
+    <div class="flow">
+      <span class="flow-step" style="background:#3b82f6">L0 RS</span><span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#ec4899">L1 RS</span><span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#10b981">L2 RS</span><span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#14b8a6">L2 AG</span><span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#f43f5e">L1 AG</span><span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#6366f1">L0 AG</span>
+    </div>
+    <p style="font-size:11px; color:#666; margin-top:8px;">每步等待上一步完成，总延迟 = 6 步之和</p>
+  </div>
+  <div class="compare-box omni">
+    <h4>OmniPipe 流水线（L0+L1 并行）</h4>
+    <div class="flow">
+      <span class="parallel-brace">{</span>
+      <span class="parallel-group">
+        <span class="flow-step" style="background:#3b82f6">L0 RS</span>
+        <span class="flow-step" style="background:#ec4899">L1 RS</span>
+      </span>
+      <span class="parallel-brace">}</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#10b981">L2 RS</span>
+      <span class="flow-arrow">→</span>
+      <span class="flow-step" style="background:#14b8a6">L2 AG</span>
+      <span class="flow-arrow">→</span>
+      <span class="parallel-brace">{</span>
+      <span class="parallel-group">
+        <span class="flow-step" style="background:#f43f5e">L1 AG</span>
+        <span class="flow-step" style="background:#6366f1">L0 AG</span>
+      </span>
+      <span class="parallel-brace">}</span>
+    </div>
+    <div class="parallel-label">↑ L0/L1 同一时间并行执行 ↑</div>
+    <p style="font-size:11px; color:#666; margin-top:8px;">L0 和 L1 在同一 stepXY 内并行执行，L2 作为外层循环</p>
+  </div>
+</div>
+
+<h3 style="margin-top:16px;">OrchestrateLoop 核心伪代码</h3>
+<div class="code-block">
+<span class="comment">// RS 阶段：L0+L1 并行，L2 外层</span>
+<span class="keyword">for</span> (stepZ = <span class="func">0</span>; stepZ &lt; interPodStepNum; stepZ++) {
+    <span class="func">PreSyncInterThreads</span>(controlThread, L2_RS);  <span class="comment">// Z 前同步</span>
+    <span class="keyword">for</span> (stepXY = <span class="func">0</span>; stepXY &lt; intraPodStepNum; stepXY++) {
+        <span class="func">PreSyncInterThreads</span>(controlThread, L0L1_RS);  <span class="comment">// XY 前同步</span>
+        <span class="keyword">if</span> (rankSizeLevel0 &gt; <span class="func">1</span>) RS_Level0.<span class="func">KernelRun</span>();  <span class="comment">// 框内 Mesh1D</span>
+        <span class="keyword">if</span> (rankSizeLevel1 &gt; <span class="func">1</span>) RS_Level1.<span class="func">KernelRun</span>();  <span class="comment">// 框间 NHR</span>
+        <span class="func">PostSyncInterThreads</span>(controlThread, L0L1_RS); <span class="comment">// XY 后同步</span>
+    }
+    RS_Level2.<span class="func">KernelRun</span>();  <span class="comment">// 跨 Pod DPU</span>
+    <span class="func">PostSyncInterThreads</span>(controlThread, L2_RS);  <span class="comment">// Z 后同步</span>
+}
+<span class="comment">// AG 阶段：同样结构</span>
+<span class="keyword">for</span> (stepZ = <span class="func">0</span>; stepZ &lt; interPodStepNum; stepZ++) { ... }
+</div>
+</div>
+
+<!-- 流水线时序图 -->
+<div class="card">
+<h2>4. 流水线时序图（单 loop · 细化版）</h2>
+
+<div class="gantt-container">
+  <!-- 顶部时间线 -->
+  <div class="gantt-header">
+    <div class="gantt-header-label"></div>
+    <div class="gantt-timeline">
+      <!-- 刻度 T0-T10 -->
+      <div class="gantt-tick" style="left:0%;"></div><div class="gantt-tick-label" style="left:0%;">T0</div>
+      <div class="gantt-tick" style="left:10%;"></div><div class="gantt-tick-label" style="left:10%;">T1</div>
+      <div class="gantt-tick" style="left:20%;"></div><div class="gantt-tick-label" style="left:20%;">T2</div>
+      <div class="gantt-tick" style="left:30%;"></div><div class="gantt-tick-label" style="left:30%;">T3</div>
+      <div class="gantt-tick" style="left:40%;"></div><div class="gantt-tick-label" style="left:40%;">T4</div>
+      <div class="gantt-tick" style="left:50%;"></div><div class="gantt-tick-label" style="left:50%;">T5</div>
+      <div class="gantt-tick" style="left:60%;"></div><div class="gantt-tick-label" style="left:60%;">T6</div>
+      <div class="gantt-tick" style="left:70%;"></div><div class="gantt-tick-label" style="left:70%;">T7</div>
+      <div class="gantt-tick" style="left:80%;"></div><div class="gantt-tick-label" style="left:80%;">T8</div>
+      <div class="gantt-tick" style="left:90%;"></div><div class="gantt-tick-label" style="left:90%;">T9</div>
+      <div class="gantt-tick" style="left:100%;"></div><div class="gantt-tick-label" style="left:100%;">T10</div>
+      <!-- 阶段条 -->
+      <div class="gantt-phase phase-copy" style="left:0%; width:8%;">PreCopy</div>
+      <div class="gantt-phase phase-rs" style="left:8%; width:42%;">RS 阶段（ReduceScatter）</div>
+      <div class="gantt-phase phase-ag" style="left:50%; width:42%;">AG 阶段（AllGather）</div>
+      <div class="gantt-phase phase-copy" style="left:92%; width:8%;">PostCopy</div>
+    </div>
+  </div>
+
+  <!-- PreCopy -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">PreCopy</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-bar" style="left:0%; width:8%; background:#f59e0b;"><span class="bar-text">usrIn→ccl</span></div>
+    </div>
+  </div>
+
+  <!-- RS-L0 (X) Mesh1D AICPU -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">RS-L0 (X) Mesh1D</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-sync" style="left:8%;"><span class="gantt-sync-label">PreXY</span></div>
+      <div class="gantt-bar bar-rs-l0" style="left:9%; width:12%;"><span class="bar-text">XY0: chunk0-2</span></div>
+      <div class="gantt-sync" style="left:21%;"><span class="gantt-sync-label">PostXY</span></div>
+      <div class="gantt-sync" style="left:22%;"><span class="gantt-sync-label">PreXY</span></div>
+      <div class="gantt-bar bar-rs-l0" style="left:23%; width:12%;"><span class="bar-text">XY1: chunk3-5</span></div>
+      <div class="gantt-sync" style="left:35%;"><span class="gantt-sync-label">PostXY</span></div>
+      <div class="gantt-sync" style="left:36%;"><span class="gantt-sync-label">PreXY</span></div>
+      <div class="gantt-bar bar-rs-l0" style="left:37%; width:12%;"><span class="bar-text">XY2: chunk6-7</span></div>
+      <div class="gantt-sync" style="left:49%;"><span class="gantt-sync-label">PostXY</span></div>
+    </div>
+  </div>
+
+  <!-- RS-L1 (Y) NHR AICPU -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">RS-L1 (Y) NHR</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-bar bar-rs-l1" style="left:9%; width:12%;"><span class="bar-text">XY0: step0+1</span></div>
+      <div class="gantt-bar bar-rs-l1" style="left:23%; width:12%;"><span class="bar-text">XY1: step0+1</span></div>
+      <div class="gantt-bar bar-rs-l1" style="left:37%; width:12%;"><span class="bar-text">XY2: step0+1</span></div>
+    </div>
+  </div>
+
+  <!-- RS-L2 (Z) DPU -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">RS-L2 (Z) DPU</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-sync" style="left:8%;"><span class="gantt-sync-label">PreZ</span></div>
+      <div class="gantt-bar bar-rs-l2" style="left:49%; width:14%;"><span class="bar-text">Z0: Pod间RS</span></div>
+      <div class="gantt-sync" style="left:63%;"><span class="gantt-sync-label">PostZ</span></div>
+    </div>
+  </div>
+
+  <!-- AG-L2 (Z) DPU -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">AG-L2 (Z) DPU</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-sync" style="left:50%;"><span class="gantt-sync-label">PreZ</span></div>
+      <div class="gantt-bar bar-ag-l2" style="left:51%; width:14%;"><span class="bar-text">Z0: Pod间AG</span></div>
+      <div class="gantt-sync" style="left:65%;"><span class="gantt-sync-label">PostZ</span></div>
+    </div>
+  </div>
+
+  <!-- AG-L1 (Y) NHR AICPU -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">AG-L1 (Y) NHR</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-sync" style="left:65%;"><span class="gantt-sync-label">PreXY</span></div>
+      <div class="gantt-bar bar-ag-l1" style="left:66%; width:8%;"><span class="bar-text">XY0</span></div>
+      <div class="gantt-sync" style="left:74%;"><span class="gantt-sync-label">PostXY</span></div>
+      <div class="gantt-sync" style="left:75%;"><span class="gantt-sync-label">PreXY</span></div>
+      <div class="gantt-bar bar-ag-l1" style="left:76%; width:8%;"><span class="bar-text">XY1</span></div>
+      <div class="gantt-sync" style="left:84%;"><span class="gantt-sync-label">PostXY</span></div>
+      <div class="gantt-sync" style="left:85%;"><span class="gantt-sync-label">PreXY</span></div>
+      <div class="gantt-bar bar-ag-l1" style="left:86%; width:6%;"><span class="bar-text">XY2</span></div>
+      <div class="gantt-sync" style="left:92%;"><span class="gantt-sync-label">PostXY</span></div>
+    </div>
+  </div>
+
+  <!-- AG-L0 (X) Mesh1D AICPU -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">AG-L0 (X) Mesh1D</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-bar bar-ag-l0" style="left:66%; width:8%;"><span class="bar-text">XY0: chunk0-2</span></div>
+      <div class="gantt-bar bar-ag-l0" style="left:76%; width:8%;"><span class="bar-text">XY1: chunk3-5</span></div>
+      <div class="gantt-bar bar-ag-l0" style="left:86%; width:6%;"><span class="bar-text">XY2</span></div>
+    </div>
+  </div>
+
+  <!-- PostCopy -->
+  <div class="gantt-row">
+    <div class="gantt-row-label">PostCopy</div>
+    <div class="gantt-row-bars">
+      <div class="gantt-bar" style="left:92%; width:8%; background:#f59e0b;"><span class="bar-text">ccl→usrOut</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- 图例 -->
+<div class="gantt-legend">
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#3b82f6;"></div>RS-L0 Mesh1D (AICPU)</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#ec4899;"></div>RS-L1 NHR (AICPU)</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#10b981;"></div>RS-L2 DPU</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#6366f1;"></div>AG-L0 Mesh1D (AICPU)</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#f43f5e;"></div>AG-L1 NHR (AICPU)</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#14b8a6;"></div>AG-L2 DPU</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-color" style="background:#f59e0b;"></div>LocalCopy</div>
+  <div class="gantt-legend-item"><div class="gantt-legend-sync"></div>Notify 同步点</div>
+</div>
+
+<!-- 时序说明 -->
+<div style="margin-top:14px; padding:12px; background:#f8fafc; border-radius:6px; font-size:12px; line-height:1.8; color:#444;">
+  <strong style="color:#1e40af;">时序说明：</strong><br>
+  1. <strong>T0-T1</strong>：PreCopy，将 usrIn 数据拷贝到 ccl buffer<br>
+  2. <strong>T1-T5</strong>：RS 阶段。外层 stepZ=0 包含 3 个 stepXY，每个 stepXY 中 RS-L0（框内 Mesh1D）和 RS-L1（框间 NHR）<strong>并行执行</strong>，通过 PreXY/PostXY Notify 同步；stepXY 全部完成后执行 RS-L2（跨 Pod DPU）<br>
+  3. <strong>T5-T9</strong>：AG 阶段。结构与 RS 对称，先 AG-L2（跨 Pod DPU），再 3 个 stepXY 中 AG-L0 和 AG-L1 并行<br>
+  4. <strong>T9-T10</strong>：PostCopy，将 ccl buffer 结果拷贝到 usrOut<br>
+  5. <strong>关键并行点</strong>：每个 stepXY 内，L0（框内 8 rank）和 L1（框间 8 rank）同时执行，是 OmniPipe 与 Sequence Executor 的核心区别
+</div>
+</div><!-- 数据量变化沙漏 -->
+<div class="card">
+<h2>5. 数据量变化（以 ds 为单位，rank 视角）</h2>
+<div class="hourglass">
+  <div class="hg-row"><div class="hg-label">usrIn</div><div class="hg-bar-wrap"><div class="hg-bar copy" style="width:400px;">ds (100%)</div></div></div>
+  <div class="hg-row"><div class="hg-label">PreCopy</div><div class="hg-bar-wrap"><div class="hg-bar copy" style="width:400px;">ds (100%)</div></div></div>
+  <div class="hg-row"><div class="hg-label">RS-L0 (8份)</div><div class="hg-bar-wrap"><div class="hg-bar rs" style="width:80px;">ds/8</div><span class="hg-bar-ext">(12.5%)</span></div></div>
+  <div class="hg-row"><div class="hg-label">RS-L1 (64份)</div><div class="hg-bar-wrap"><div class="hg-bar rs" style="width:24px;">&nbsp;</div><span class="hg-bar-ext">ds/64 (1.6%)</span></div></div>
+  <div class="hg-row"><div class="hg-label">RS-L2 (256份)</div><div class="hg-bar-wrap"><div class="hg-bar rs" style="width:12px;">&nbsp;</div><span class="hg-bar-ext">ds/256 (0.4%)</span></div></div>
+  <div class="hg-row"><div class="hg-label">AG-L2</div><div class="hg-bar-wrap"><div class="hg-bar ag" style="width:24px;">&nbsp;</div><span class="hg-bar-ext">ds/64 (1.6%)</span></div></div>
+  <div class="hg-row"><div class="hg-label">AG-L1</div><div class="hg-bar-wrap"><div class="hg-bar ag" style="width:80px;">ds/8</div><span class="hg-bar-ext">(12.5%)</span></div></div>
+  <div class="hg-row"><div class="hg-label">AG-L0</div><div class="hg-bar-wrap"><div class="hg-bar ag" style="width:400px;">ds (100%)</div></div></div>
+  <div class="hg-row"><div class="hg-label">PostCopy</div><div class="hg-bar-wrap"><div class="hg-bar copy" style="width:400px;">ds (100%)</div></div></div>
+  <div class="hg-row"><div class="hg-label">usrOut</div><div class="hg-bar-wrap"><div class="hg-bar copy" style="width:400px;">ds (100%)</div></div></div>
+</div>
+</div>
+
+<!-- 通信量对比 -->
+<div class="card">
+<h2>6. 各阶段通信量对比（单 rank）</h2>
+<div class="comm-bars">
+  <div class="comm-row"><div class="comm-name">RS-L0 (Mesh1D)</div><div class="comm-bar-wrap"><div class="comm-bar" style="width:87.5%; background:#3b82f6;">7×ds/8 = 87.5% ds</div></div></div>
+  <div class="comm-row"><div class="comm-name">RS-L1 (NHR)</div><div class="comm-bar-wrap"><div class="comm-bar" style="width:14%; background:#ec4899;">&nbsp;</div><span class="comm-bar-ext">7×ds/64 = 10.9% ds</span></div></div>
+  <div class="comm-row"><div class="comm-name">RS-L2 (DPU)</div><div class="comm-bar-wrap"><div class="comm-bar" style="width:4%; background:#10b981;">&nbsp;</div><span class="comm-bar-ext">3×ds/256 = 1.2% ds</span></div></div>
+  <div class="comm-row"><div class="comm-name">AG-L2 (DPU)</div><div class="comm-bar-wrap"><div class="comm-bar" style="width:4%; background:#14b8a6;">&nbsp;</div><span class="comm-bar-ext">3×ds/256 = 1.2% ds</span></div></div>
+  <div class="comm-row"><div class="comm-name">AG-L1 (NHR)</div><div class="comm-bar-wrap"><div class="comm-bar" style="width:14%; background:#f43f5e;">&nbsp;</div><span class="comm-bar-ext">7×ds/64 = 10.9% ds</span></div></div>
+  <div class="comm-row"><div class="comm-name">AG-L0 (Mesh1D)</div><div class="comm-bar-wrap"><div class="comm-bar" style="width:87.5%; background:#6366f1;">7×ds/8 = 87.5% ds</div></div></div>
+</div>
+<table style="margin-top:14px;">
+<tr><th>阶段</th><th>发送量</th><th>接收量</th><th>并行度</th><th>执行单元</th></tr>
+<tr><td>RS-L0</td><td>87.5% ds</td><td>87.5% ds</td><td>7 路并行</td><td>AICPU</td></tr>
+<tr><td>RS-L1</td><td>10.9% ds</td><td>10.9% ds</td><td>1 路 (NHR)</td><td>AICPU</td></tr>
+<tr><td>RS-L2</td><td>1.2% ds</td><td>1.2% ds</td><td>3 路并行</td><td>DPU</td></tr>
+<tr><td>AG-L2</td><td>1.2% ds</td><td>1.2% ds</td><td>1 路 (NHR)</td><td>DPU</td></tr>
+<tr><td>AG-L1</td><td>10.9% ds</td><td>10.9% ds</td><td>1 路 (NHR)</td><td>AICPU</td></tr>
+<tr><td>AG-L0</td><td>87.5% ds</td><td>87.5% ds</td><td>7 路并行</td><td>AICPU</td></tr>
+<tr><td><strong>总计</strong></td><td><strong>~199.2% ds</strong></td><td><strong>~199.2% ds</strong></td><td>-</td><td>-</td></tr>
+</table>
+</div>
+
+<!-- 同步机制 -->
+<div class="card">
+<h2>7. 线程与 Notify 同步机制</h2>
+<div style="display:flex; gap:20px; flex-wrap:wrap;">
+<div style="flex:1; min-width:300px;">
+<h3>线程分配</h3>
+<div class="code-block">
+controlThread_ (threads_[0])
+├── RS-Level0 线程组 (levelThreadsRS_[0])
+├── RS-Level1 线程组 (levelThreadsRS_[1])
+├── RS-Level2 线程组 (levelThreadsRS_[2])
+├── AG-Level0 线程组 (levelThreadsAG_[0])
+├── AG-Level1 线程组 (levelThreadsAG_[1])
+└── AG-Level2 线程组 (levelThreadsAG_[2])
+</div>
+</div>
+<div style="flex:1; min-width:300px;">
+<h3>同步点</h3>
+<table>
+<tr><th>同步类型</th><th>触发时机</th><th>方向</th></tr>
+<tr><td>PreSync-XY</td><td>每个 stepXY 开始</td><td>主线程 → L0/L1</td></tr>
+<tr><td>PostSync-XY</td><td>每个 stepXY 结束</td><td>L0/L1 → 主线程</td></tr>
+<tr><td>PreSync-Z</td><td>每个 stepZ 开始</td><td>主线程 → L2</td></tr>
+<tr><td>PostSync-Z</td><td>每个 stepZ 结束</td><td>L2 → 主线程</td></tr>
+</table>
+</div>
+</div>
+</div>
+
+<!-- 与 Sequence 对比 -->
+<div class="card">
+<h2>8. OmniPipe vs Sequence Executor 对比</h2>
+<table>
+<tr><th>维度</th><th>Sequence Executor</th><th>OmniPipe Executor</th></tr>
+<tr><td>拓扑层级</td><td>2 级（4×4 = 16 rank）</td><td>3 级（8×8×4 = 256 rank）</td></tr>
+<tr><td>模板数</td><td>4 个</td><td>6 个</td></tr>
+<tr><td>调度方式</td><td>严格串行 4 步</td><td>L0+L1 并行，L2 外层</td></tr>
+<tr><td>并行度</td><td>每步单模板</td><td>L0/L1 同时执行</td></tr>
+<tr><td>同步粒度</td><td>模板间 3 次边界</td><td>每 stepXY/stepZ 同步</td></tr>
+<tr><td>DPU 使用</td><td>Step2/3 用 DPU</td><td>Level2 用 DPU</td></tr>
+<tr><td>适用规模</td><td>中小规模（≤16 rank）</td><td>大规模（≥64 rank）</td></tr>
+<tr><td>总发送量</td><td>~187.5% ds (4×4)</td><td>~199.2% ds (8×8×4)</td></tr>
+</table>
+</div>
+
+<!-- 关键设计要点 -->
+<div class="card">
+<h2>9. 关键设计要点</h2>
+<ol style="padding-left:20px; line-height:1.8; font-size:13px;">
+<li><strong>OmniPipe 流水线</strong>：Level0 和 Level1 并行执行，掩盖框内/框间通信延迟，是与 Sequence Executor 的核心区别</li>
+<li><strong>三级分层策略</strong>：框内 Mesh1D（高带宽低延迟）+ 框间 NHR（通用拓扑适配）+ 跨 Pod DPU（RDMA 硬件卸载）</li>
+<li><strong>统一 ccl buffer</strong>：所有 RS/AG 阶段数据都在 ccl buffer 中流转（inBuffType=HCCL_BUFFER），减少内存拷贝</li>
+<li><strong>Notify 精细同步</strong>：按 stepXY/stepZ 粒度同步，支持流水线重叠，同步开销可控</li>
+<li><strong>带宽感知切分</strong>：根据各层带宽（BW_OMNI_DEFAULT / BW_OMNI_UBX_ROCE 等）计算等价带宽，优化数据切分比例</li>
+<li><strong>多 loop 处理</strong>：按 ccl buffer 容量计算 maxCountPerLoop 和 loopTimes，支持大数据量分轮处理</li>
+</ol>
+</div>
+
+<div style="text-align:center; color:#999; font-size:11px; padding:10px;">
+数据来源：HCCL MC2 源码（ins_v2_all_reduce_omnipipe_executor.cc line954-958）
+</div>
+
+</body>
+</html>

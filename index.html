@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ME_XCCL 文档导航</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      background: #f5f7fa;
+      color: #2c3e50;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+
+    /* 头部 */
+    .header {
+      text-align: center;
+      margin-bottom: 48px;
+    }
+
+    .header h1 {
+      font-size: 32px;
+      font-weight: 700;
+      color: #1a1a2e;
+      margin-bottom: 12px;
+    }
+
+    .header p {
+      font-size: 16px;
+      color: #6b7280;
+    }
+
+    /* 分类区块 */
+    .section {
+      margin-bottom: 40px;
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: 600;
+      color: #1a1a2e;
+      margin-bottom: 16px;
+      padding-left: 12px;
+      border-left: 4px solid #4f46e5;
+    }
+
+    .section-desc {
+      font-size: 14px;
+      color: #6b7280;
+      margin-bottom: 20px;
+      padding-left: 16px;
+    }
+
+    /* 链接列表 */
+    .link-list {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+
+    .link-item {
+      display: flex;
+      align-items: center;
+      padding: 14px 20px;
+      text-decoration: none;
+      color: #1a1a2e;
+      font-size: 15px;
+      border-bottom: 1px solid #f3f4f6;
+      transition: background 0.15s ease;
+    }
+
+    .link-item:last-child {
+      border-bottom: none;
+    }
+
+    .link-item:hover {
+      background: #f5f3ff;
+      color: #4f46e5;
+    }
+
+    .link-num {
+      display: inline-block;
+      width: 24px;
+      height: 24px;
+      line-height: 24px;
+      text-align: center;
+      background: #eef2ff;
+      color: #4f46e5;
+      border-radius: 5px;
+      font-size: 13px;
+      font-weight: 600;
+      margin-right: 14px;
+    }
+
+    .link-title {
+      flex: 1;
+      font-weight: 500;
+    }
+
+    .link-path {
+      font-size: 12px;
+      color: #9ca3af;
+      font-family: "Consolas", "Monaco", monospace;
+    }
+
+    /* 子分组 */
+    .sub-section {
+      margin-bottom: 24px;
+    }
+    .sub-section-title {
+      font-size: 16px;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 10px;
+      padding-left: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sub-section-title .tag {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 8px;
+      border-radius: 10px;
+      background: #e0e7ff;
+      color: #4338ca;
+    }
+    .sub-section-title .tag.sole {
+      background: #d1fae5;
+      color: #047857;
+    }
+    .sub-section-desc {
+      font-size: 13px;
+      color: #6b7280;
+      margin-bottom: 12px;
+      padding-left: 14px;
+    }
+    .link-list.indented {
+      margin-left: 14px;
+    }
+
+    /* 页脚 */
+    .footer {
+      text-align: center;
+      margin-top: 60px;
+      padding-top: 24px;
+      border-top: 1px solid #e5e7eb;
+      font-size: 13px;
+      color: #9ca3af;
+    }
+
+    /* 占位提示 */
+    .placeholder {
+      background: #f9fafb;
+      border: 2px dashed #d1d5db;
+      border-radius: 10px;
+      padding: 32px;
+      text-align: center;
+      color: #9ca3af;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <!-- 头部 -->
+    <div class="header">
+      <h1>ME_XCCL 文档导航</h1>
+      <p>通信库学习笔记与可视化示意图索引</p>
+    </div>
+
+    <!-- ========== HCCL 框架与算法选择逻辑 ========== -->
+    <div class="section">
+      <div class="section-title">HCCL 框架与算法选择逻辑</div>
+      <div class="section-desc">
+        路径：<code>A01-HCCL/00-frame/</code> — AllReduce Selector 入口分流与五级状态机（DPU / CCU_MS / CCU_SCHED / AIV / AICPU）
+      </div>
+      <div class="link-list">
+        <a class="link-item" href="A01-HCCL/00-frame/AllReduce_Selector_算法选择分析.html">
+          <span class="link-num" style="background:#dbeafe;color:#1e40af;">F1</span>
+          <span class="link-title">AllReduce 算法选择逻辑分析</span>
+          <span class="link-path">00-frame/AllReduce_Selector_算法选择分析.html</span>
+        </a>
+      </div>
+    </div>
+
+    <!-- ========== HCCL AllReduce (AR) ========== -->
+    <div class="section">
+      <div class="section-title">HCCL AllReduce (AR) 算子示意图</div>
+      <div class="section-desc">
+        路径：<code>A01-HCCL/01-Ops/AR/</code> — 包含 Sequence Executor（多模板串行编排）和 Sole Executor（单模板独立执行）两类
+      </div>
+
+      <!-- 子分组 1: Sequence Executor -->
+      <div class="sub-section">
+        <div class="sub-section-title">
+          <span class="tag">Sequence Executor</span>
+          多模板串行编排
+        </div>
+        <div class="sub-section-desc">
+          路径：<code>AR/</code> — 将 RS/AG 拆分为框内+框间四个模板串行执行，支持 DPU
+        </div>
+        <div class="link-list indented">
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sequence_Executor_分析.html">
+            <span class="link-num">S1</span>
+            <span class="link-title">Sequence Executor 四模板串行分析（4×4 rank）</span>
+            <span class="link-path">Sequence_Executor_分析.html</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 子分组 2: Sole Executor -->
+      <div class="sub-section">
+        <div class="sub-section-title">
+          <span class="tag sole">Sole Executor</span>
+          单模板独立执行
+        </div>
+        <div class="sub-section-desc">
+          路径：<code>AR/Sole_Excutor/</code> — 五种 AICPU AllReduce 模板，各自独立完成全量规约
+        </div>
+        <div class="link-list indented">
+
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sole_Excutor/01-Mesh1DOneShot.html">
+            <span class="link-num">01</span>
+            <span class="link-title">Mesh1D One-Shot</span>
+            <span class="link-path">Sole_Excutor/01-Mesh1DOneShot.html</span>
+          </a>
+
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sole_Excutor/02-Mesh1DTwoShot.html">
+            <span class="link-num">02</span>
+            <span class="link-title">Mesh1D Two-Shot</span>
+            <span class="link-path">Sole_Excutor/02-Mesh1DTwoShot.html</span>
+          </a>
+
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sole_Excutor/03-NHR.html">
+            <span class="link-num">03</span>
+            <span class="link-title">NHR (Nonuniform Hierarchical Ring,非均衡的层次环)</span>
+            <span class="link-path">Sole_Excutor/03-NHR.html</span>
+          </a>
+
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sole_Excutor/04-Mesh1DTwoShotMeshChunk.html">
+            <span class="link-num">04</span>
+            <span class="link-title">Mesh1D TwoShot MeshChunk</span>
+            <span class="link-path">Sole_Excutor/04-Mesh1DTwoShotMeshChunk.html</span>
+          </a>
+
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sole_Excutor/05-AicpuReduceNHR.html">
+            <span class="link-num">05</span>
+            <span class="link-title">Aicpu Reduce NHR</span>
+            <span class="link-path">Sole_Excutor/05-AicpuReduceNHR.html</span>
+          </a>
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Sole_Excutor/A00-模板综合对比.html" style="background:#fefce8;">
+            <span class="link-num" style="background:#fde68a;color:#92400e;">★</span>
+            <span class="link-title">模板综合对比（rank=4 / rank=N / Reduce / cclBuff 倍率根源 / NHR 收发信息）</span>
+            <span class="link-path">Sole_Excutor/A00-模板综合对比.html</span>
+          </a>
+
+
+        </div>
+      </div>
+      <!-- 子分组 3: Concurrent Executor -->
+      <div class="sub-section">
+        <div class="sub-section-title">
+          <span class="tag" style="background:#fce7f3;color:#be185d;">Concurrent Executor</span>
+          双模板并发编排
+        </div>
+        <div class="sub-section-desc">
+          路径：<code>AR/</code> — 按带宽比例将数据切分给 Mesh1D TwoShot + NHR 两个模板同时并发执行
+        </div>
+        <div class="link-list indented">
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/Concurrent_Executor_分析.html">
+            <span class="link-num" style="background:#fce7f3;color:#be185d;">C1</span>
+            <span class="link-title">Concurrent Executor 双模板并发分析（4P，rank1 视角，AICPU_TS，带宽比 11:10）</span>
+            <span class="link-path">Concurrent_Executor_分析.html</span>
+          </a>
+        </div>
+      </div>
+
+      <!-- 子分组 4: OmniPipe Executor -->
+      <div class="sub-section">
+        <div class="sub-section-title">
+          <span class="tag" style="background:#fef3c7;color:#b45309;">OmniPipe Executor</span>
+          三级流水线编排
+        </div>
+        <div class="sub-section-desc">
+          路径：<code>AR/</code> — 256 rank 三级拓扑（框内 Mesh / 框间 NHR / 跨Pod DPU）流水线重叠执行
+        </div>
+        <div class="link-list indented">
+          <a class="link-item" href="A01-HCCL/01-Ops/AR/OmniPipe_Excutor_分析.html">
+            <span class="link-num" style="background:#fef3c7;color:#b45309;">O1</span>
+            <span class="link-title">OmniPipe Executor 三级流水线分析（8×8×4=256 rank）</span>
+            <span class="link-path">OmniPipe_Excutor_分析.html</span>
+          </a>
+        </div>
+      </div>
+    </div>
+    <!--
+    <div class="section">
+      <div class="section-title">通信基础</div>
+      <div class="section-desc">路径：<code>A00-CommBase/</code></div>
+      <div class="card-grid">
+        <div class="placeholder">待添加...</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">NCCL</div>
+      <div class="section-desc">路径：<code>A02-NCCL/</code></div>
+      <div class="card-grid">
+        <div class="placeholder">待添加...</div>
+      </div>
+    </div>
+    -->
+    <!-- ========== 参考资料 ========== -->
+    <div class="section">
+      <div class="section-title">参考资料</div>
+      <div class="section-desc">
+        以下为 HCCL 相关开源仓库，本项目内容均基于这些源码进行学习分析，<b>仅用于个人学习研究</b>。
+      </div>
+      <div class="link-list">
+        <a class="link-item" href="https://gitcode.com/cann/hccl" target="_blank" rel="noopener noreferrer">
+          <span class="link-num" style="background:#fce7f3;color:#be185d;">G</span>
+          <span class="link-title">CANN HCCL（GitCode 镜像）</span>
+          <span class="link-path">gitcode.com/cann/hccl</span>
+        </a>
+        <a class="link-item" href="https://gitee.com/ascend/cann-hccl" target="_blank" rel="noopener noreferrer">
+          <span class="link-num" style="background:#fce7f3;color:#be185d;">G</span>
+          <span class="link-title">CANN HCCL（Gitee 官方）</span>
+          <span class="link-path">gitee.com/ascend/cann-hccl</span>
+        </a>
+      </div>
+      <div style="margin-top:12px;padding:12px 16px;background:#fefce8;border:1px solid #fde68a;border-radius:8px;font-size:13px;color:#92400e;">
+        <b>声明：</b>本仓库所有内容（包括可视化示意图、分析文档、代码注释等）均为个人学习笔记，
+        参考上述开源仓库源码整理而成，<b>仅用于个人学习与技术研究</b>，不用于任何商业用途。
+      </div>
+    </div>
+
+
+
+    <!-- 页脚 -->
+    <div class="footer">
+      ME_XCCL · 文档导航首页 · 编辑此文件可增删链接
+    </div>
+
+  </div>
+</body>
+</html>
